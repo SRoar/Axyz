@@ -1,0 +1,20 @@
+# Secrets & Environment
+.env
+*.env
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# OS Files
+.DS_Store
+.vscode/
+.idea/
+
+# Captured images / logs
+*.jpg
+*.jpeg
+*.png
