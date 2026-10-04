@@ -67,12 +67,29 @@ def parse_s(line: str):
         return None
 
 
+def drain(ser, max_s: float = 15.0) -> None:
+    """Throw away data buffered while nobody was reading, so recorded data is live.
+
+    The port can hold tens of thousands of old lines (seen: 5000 lines after ~4 min), so one
+    reset_input_buffer() is not enough; keep clearing until only a trickle is waiting.
+    """
+    t0 = time.time()
+    while time.time() - t0 < max_s:
+        waiting = ser.in_waiting
+        if waiting < 256:
+            break
+        ser.read(waiting)
+    ser.reset_input_buffer()
+    ser.readline()  # discard the partial line at the cut
+
+
 def record(ser, label: str, seconds: float, out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-    ser.reset_input_buffer()  # drop any backlog so wall time and device time line up
+    drain(ser)
     t0 = time.time()
     n = 0
+    first_ms = None
     last_ms = None
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
@@ -84,10 +101,17 @@ def record(ser, label: str, seconds: float, out_dir: str) -> str:
                 continue
             if last_ms is not None and rec[0] < last_ms:  # device rebooted mid-recording
                 print("  warning: device clock went backwards (board restarted?)")
+            if first_ms is None:
+                first_ms = rec[0]
             last_ms = rec[0]
             w.writerow([f"{time.time() - t0:.3f}", *rec, label])
             n += 1
-    print(f"  {label}: {n} samples in {seconds:.0f} s ({n / seconds:.1f} Hz) -> {path}")
+    msg = f"  {label}: {n} samples in {seconds:.0f} s ({n / seconds:.1f} Hz) -> {path}"
+    if first_ms is not None and last_ms is not None and last_ms > first_ms:
+        ratio = (last_ms - first_ms) / 1000.0 / seconds  # device time / wall time, should be ~1.0
+        if abs(ratio - 1.0) > 0.1:
+            msg += f"\n  WARNING: device time / wall time = {ratio:.2f}; backlog was not fully drained, re-record this clip"
+    print(msg)
     return path
 
 
