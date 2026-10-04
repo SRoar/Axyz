@@ -1,0 +1,12 @@
+[
+  {
+    "id": "q1",
+    "text": "Explain the first law of thermodynamics.",
+    "box_id": "box1"
+  },
+  {
+    "id": "q2",
+    "text": "Describe how the second law of thermodynamics relates to entropy.",
+    "box_id": "box2"
+  }
+]
