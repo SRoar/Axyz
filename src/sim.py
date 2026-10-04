@@ -63,7 +63,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--real", default="", help="comma list: imu,tracker,guidance,voice,brain,auditor")
     ap.add_argument("--quiet", action="store_true")
-    ap.add_argument("--questions", default="data/questions.json")
+    ap.add_argument("--questions", default="",
+                    help="questions file; default = sample_questions(), matching the sample layout "
+                         "(data/questions.json is the real sheet)")
     ap.add_argument("--layout", default="",
                     help="layout file; default = sample_layout(), which the fake pen's scripted path targets "
                          "(data/layout.json is the real sheet)")
@@ -71,7 +73,7 @@ def main() -> int:
     real = [x for x in a.real.split(",") if x]
 
     try:
-        questions = load_questions(a.questions)
+        questions = load_questions(a.questions) if a.questions else sample_questions()
         layout = load_layout(a.layout) if a.layout else sample_layout()
     except FileNotFoundError:
         questions, layout = sample_questions(), sample_layout()

@@ -7,7 +7,7 @@ from src.guidance import IN_BOX_SPEECH, GuidanceEngine, box_offset_cm, box_statu
 def test_box_offset_and_direction_words():
     box = Box("b", 0.5, 0.4, 0.8, 0.6)
     assert box_offset_cm(0.6, 0.5, box) == (0.0, 0.0, 0.0)
-    assert direction_words(0.0, 0.0) == "inside"
+    assert direction_words(0.0, 0.0) == "at the edge"
     dx, dy, dist = box_offset_cm(0.3, 0.2, box)              # up-left of the box
     assert dx == pytest.approx(0.2 * PAGE_W_CM) and dy == pytest.approx(0.2 * PAGE_H_CM)
     assert dist == pytest.approx((dx ** 2 + dy ** 2) ** 0.5)

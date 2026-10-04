@@ -1,12 +1,27 @@
 [
   {
     "id": "q1",
-    "text": "Explain the first law of thermodynamics.",
+    "text": "What color is the clear sky?",
     "box_id": "box1"
   },
   {
     "id": "q2",
-    "text": "Describe how the second law of thermodynamics relates to entropy.",
+    "text": "What planet do humans live on?",
     "box_id": "box2"
+  },
+  {
+    "id": "q3",
+    "text": "What is frozen liquid water called?",
+    "box_id": "box3"
+  },
+  {
+    "id": "q4",
+    "text": "What gas do humans breathe in?",
+    "box_id": "box4"
+  },
+  {
+    "id": "q5",
+    "text": "What organ pumps blood in humans?",
+    "box_id": "box5"
   }
 ]

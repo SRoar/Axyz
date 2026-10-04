@@ -87,13 +87,13 @@ def box_offset_cm(x: float, y: float, box: Box, page_w_cm: float = PAGE_W_CM,
 
 
 def direction_words(dx_cm: float, dy_cm: float, min_cm: float = 0.3) -> str:
-    """'down 3.1 cm, left 1.0 cm' (axes below min_cm are left out); 'inside' at 0."""
+    """'down 3.1 cm, left 1.0 cm' (axes below min_cm are left out); 'at the edge' when both are."""
     parts = []
     if abs(dy_cm) >= min_cm:
         parts.append(f"{'down' if dy_cm > 0 else 'up'} {abs(dy_cm):.1f} cm")
     if abs(dx_cm) >= min_cm:
         parts.append(f"{'right' if dx_cm > 0 else 'left'} {abs(dx_cm):.1f} cm")
-    return ", ".join(parts) or "inside"
+    return ", ".join(parts) or "at the edge"
 
 
 def box_status(inside_id: Optional[str], target: Optional[Box], offsets: dict) -> str:

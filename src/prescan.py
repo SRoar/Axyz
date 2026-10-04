@@ -1,21 +1,26 @@
 """
-Prescan: find the answer box of every question on the blank test sheet -> data/layout.json.  Owner: Dev 2.
+Prescan: read the blank test sheet -> data/layout.json (answer boxes) + data/questions.json
+(question text).  Owner: Dev 2.
 
     python -m src.prescan                         # camera -> rectified page -> Gemini -> preview -> save
     python -m src.prescan --manual                # click two opposite corners per box instead of Gemini
     python -m src.prescan --image page.png        # use a saved page-rectified image instead of the camera
+    python -m src.prescan --keep-questions        # boxes only: leave data/questions.json alone
     python -m src.prescan --yes                   # skip the preview confirmation
 
 Camera path: a live window shows the view until the sheet is found (all 4 corners visible, hands
 out, still); the photo is then page-rectified, so Gemini's 0-1000 coordinates ARE page-normalized
 coordinates x 1000. The new page position is saved to data/page_calibration.json for the tracker.
+Gemini also reads each question's printed text: question N -> {"id": "q<N>", "text": ..., "box_id"}.
+--manual can't read text, so it keeps data/questions.json as it is.
 Box ids come from data/questions.json (question N -> its box_id), else "box<N>".
-COMMIT data/layout.json so the demo never depends on the network.
+COMMIT data/layout.json and data/questions.json so the demo never depends on the network.
 """
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 from typing import Dict, List, Optional, Tuple
@@ -23,7 +28,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from src.contracts import Box, RealClock, load_layout, load_questions, save_layout
+from src.contracts import Box, Question, RealClock, load_layout, load_questions, save_layout, save_questions
 
 PRESCAN_IMAGE = "data/prescan_page.png"
 MIN_PAGE_BRIGHTNESS = 40.0
@@ -34,8 +39,9 @@ PROMPT = (
     "page edges. The sheet has numbered free-response questions, each followed by a large rectangular "
     "answer box drawn with thick dark lines where the student writes. For EVERY answer box return the "
     "question number it belongs to and the box's INNER rectangle (inside the border lines) as "
-    "ymin, xmin, ymax, xmax normalized to 0-1000 over the full image. Do not return the question text "
-    "area, only the empty writing box. Order by question number."
+    "ymin, xmin, ymax, xmax normalized to 0-1000 over the full image. The rectangle must be the empty "
+    "writing box only, not the question text area. Also transcribe the question's printed text exactly "
+    "(full sentence, without its leading number). Order by question number."
 )
 
 
@@ -49,6 +55,22 @@ def box_ids_for(questions_path: str, n: int) -> List[str]:
     return ids[:n] + [f"box{i + 1}" for i in range(len(ids), n)]
 
 
+def clean_question_text(text: str) -> str:
+    """'  3.  What is frozen\nwater called? ' -> 'What is frozen water called?'"""
+    text = " ".join(text.split())
+    return re.sub(r"^(?:Q(?:uestion)?\s*)?\d+\s*(?:[.):-]\s*|\s+)", "", text, flags=re.IGNORECASE)
+
+
+def make_questions(texts: Dict[int, str], ids: List[str]) -> List[Question]:
+    """Question number -> printed text  =>  [Question("q<N>", text, ids[N-1])] in number order."""
+    out = []
+    for n in sorted(texts):
+        text = clean_question_text(texts[n])
+        if text and 1 <= n <= len(ids):
+            out.append(Question(f"q{n}", text, ids[n - 1]))
+    return out
+
+
 def _clamp01(v: float) -> float:
     return min(1.0, max(0.0, v))
 
@@ -58,7 +80,8 @@ def make_box(box_id: str, x0: float, y0: float, x1: float, y1: float) -> Box:
 
 
 # --------------------------------------------------------------------------- Gemini
-def gemini_boxes(image: np.ndarray, questions_path: str) -> Dict[str, Box]:
+def gemini_sheet(image: np.ndarray, questions_path: str) -> Tuple[Dict[str, Box], List[Question]]:
+    """Answer boxes + the printed question text, from one Gemini call."""
     from pydantic import BaseModel, Field
     from google import genai
     from google.genai import types
@@ -66,6 +89,7 @@ def gemini_boxes(image: np.ndarray, questions_path: str) -> Dict[str, Box]:
 
     class AnswerBox(BaseModel):
         question_number: int = Field(description="Number printed next to the question (1, 2, 3, ...)")
+        question_text: str = Field(description="The question exactly as printed, without its number")
         ymin: int = Field(description="Top edge, 0-1000")
         xmin: int = Field(description="Left edge, 0-1000")
         ymax: int = Field(description="Bottom edge, 0-1000")
@@ -104,7 +128,7 @@ def gemini_boxes(image: np.ndarray, questions_path: str) -> Dict[str, Box]:
         if 1 <= b.question_number <= len(ids):
             bid = ids[b.question_number - 1]
             out[bid] = make_box(bid, b.xmin / 1000, b.ymin / 1000, b.xmax / 1000, b.ymax / 1000)
-    return out
+    return out, make_questions({b.question_number: b.question_text for b in found}, ids)
 
 
 # --------------------------------------------------------------------------- manual
@@ -221,13 +245,18 @@ def capture_page(camera_args) -> np.ndarray:
     return snap
 
 
-def preview(image: np.ndarray, boxes: Dict[str, Box]) -> bool:
+def preview(image: np.ndarray, boxes: Dict[str, Box], questions: Optional[List[Question]] = None) -> bool:
     view = image.copy()
     h, w = view.shape[:2]
     for b in boxes.values():
         cv2.rectangle(view, (int(b.xmin * w), int(b.ymin * h)), (int(b.xmax * w), int(b.ymax * h)), (0, 180, 0), 3)
         cv2.putText(view, b.id, (int(b.xmin * w) + 6, int(b.ymin * h) + 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 180, 0), 2)
+    for q in questions or []:
+        b = boxes.get(q.box_id)
+        if b is not None:      # what was read, under the box label
+            cv2.putText(view, f"{q.id}: {q.text}"[:70], (int(b.xmin * w) + 6, int(b.ymin * h) + 48),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 60, 0), 1)
     cv2.putText(view, "ENTER = save   ESC = discard", (8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     scale = min(1.0, 900.0 / h)
     cv2.imshow("prescan result", cv2.resize(view, None, fx=scale, fy=scale) if scale < 1 else view)
@@ -253,6 +282,8 @@ def main() -> int:
     ap.add_argument("--boxes", type=int, default=None, help="number of boxes for --manual (default: #questions)")
     ap.add_argument("--questions", default="data/questions.json")
     ap.add_argument("--out", default="data/layout.json")
+    ap.add_argument("--keep-questions", action="store_true",
+                    help="don't overwrite --questions with the text read from the sheet")
     ap.add_argument("--yes", action="store_true", help="save without the preview window")
     a = ap.parse_args()
 
@@ -266,11 +297,12 @@ def main() -> int:
         cv2.imwrite(PRESCAN_IMAGE, image)
         print(f"[prescan] saved the rectified page to {PRESCAN_IMAGE}")
 
+    questions: List[Question] = []
     if a.manual:
         boxes = manual_boxes(image, a.questions, a.boxes)
     else:
         try:
-            boxes = gemini_boxes(image, a.questions)
+            boxes, questions = gemini_sheet(image, a.questions)
         except Exception as e:
             print(f"[prescan] Gemini failed ({e}); falling back to --manual")
             boxes = manual_boxes(image, a.questions, a.boxes)
@@ -279,13 +311,19 @@ def main() -> int:
         return 1
     for b in boxes.values():
         print(f"  {b.id}: x {b.xmin:.3f}-{b.xmax:.3f}  y {b.ymin:.3f}-{b.ymax:.3f}")
+    if questions:
+        print(f"[prescan] read {len(questions)} questions:")
+        for q in questions:
+            print(f"  {q.id} -> {q.box_id}: {q.text}")
+    save_q = bool(questions) and not a.keep_questions
     try:
-        missing = {q.box_id for q in load_questions(a.questions)} - set(boxes)
+        final_q = questions if save_q else load_questions(a.questions)
+        missing = {q.box_id for q in final_q} - set(boxes)
         if missing:
             print(f"[prescan] WARNING: questions reference boxes that were not found: {sorted(missing)}")
     except (FileNotFoundError, ValueError):
         pass
-    if not a.yes and not preview(image, boxes):
+    if not a.yes and not preview(image, boxes, questions):
         print("[prescan] discarded")
         return 1
     if os.path.exists(a.out):
@@ -296,6 +334,9 @@ def main() -> int:
             pass
     save_layout(a.out, boxes)
     print(f"[prescan] wrote {a.out}. Commit it so the demo works offline.")
+    if save_q:
+        save_questions(a.questions, questions)
+        print(f"[prescan] wrote {len(questions)} questions to {a.questions}. Commit it too.")
     return 0
 
 
