@@ -1,7 +1,7 @@
 # TactileReader — Master Plan (hackathon hours 12 → 24)
 
 Blind / low-vision student takes a **paper** free-response test. No scribe.
-A **pen probe** (Arduino UNO Q: accelerometer + light sensor + 2 buzzers) and an **overhead camera** guide the pen to each answer box, keep the writing inside it, and a **voice** reads the questions and confirms the answer.
+A **pen probe** (Arduino UNO Q: accelerometer + 2 buzzers; no light or UV sensor) and an **overhead camera** guide the pen to each answer box, keep the writing inside it, and a **voice** reads the questions and confirms the answer.
 
 > **Design rule: the camera knows WHERE the pen is. The accelerometer knows WHAT the pen is doing. The brain acts on the combination.**
 > The IMU is essential because the camera cannot tell hovering from writing, cannot see the pen under the hand, and has no way to receive a "I'm done" command. The IMU provides all three.
@@ -36,8 +36,8 @@ Drop-in: copy `src/contracts.py fakes.py factory.py system.py sim.py` and `data/
 ```
  ┌────────────── PEN PROBE (Arduino UNO Q) ────────────┐        ┌───────── OVERHEAD CAMERA ─────────┐
  │ MMA7660 accel 120Hz ─► classifier ─► STILL/MOVING/  │        │ frame ─► marker detect ─► homography│
- │                        WRITING/LIFTED + taps 1/2/3  │        │          ─► PenState (page coords)  │
- │ light sensor A0 ─► raw stream                       │        └───────────────┬────────────────────┘
+ │                        WRITING/LIFTED + taps 1/2    │        │          ─► PenState (page coords)  │
+ │ accelerometer only (no light / UV sensor)           │        └───────────────┬────────────────────┘
  │ buzzers D3(L) D4(R) ◄── haptic pattern engine       │                        │
  └──────────┬───────────────────────────▲──────────────┘                        │
    S/M/T lines│                         │ H,<CMD>                               ▼
@@ -62,7 +62,7 @@ Coordinate space everywhere: **page-normalized** (0,0 top-left of paper → 1,1 
 |---|---|---|
 | Where is the pen tip on the page? | Camera (`PenState`) | IMU (drifts) |
 | Is the pen resting / travelling / writing / picked up? | **IMU only** (`MotionState`) | Camera (hand occlusion) |
-| Did the student give a command (repeat / skip / done)? | **IMU taps**, voice as backup | Camera |
+| Did the student give a command (read-or-repeat / next question)? | **IMU taps** (1 or 2), voice as backup | Camera |
 | Is the pen inside the box? | Guidance (camera + box) | — |
 | May the voice speak / may the margin buzzer fire? | **Brain, gated by IMU state** | — |
 | Did the answer land in the box? | Auditor (Gemini on a snapshot) | — |
@@ -71,7 +71,7 @@ Coordinate space everywhere: **page-normalized** (0,0 top-left of paper → 1,1 
 
 ## 3. Contract summary (full detail in `contracts.py`)
 
-**Motion states:** `STILL`, `MOVING`, `WRITING`, `LIFTED`. **Taps:** 1 = repeat question, 2 = skip, 3 = "I'm done, audit".
+**Motion states:** `STILL`, `MOVING`, `WRITING`, `LIFTED`. **Taps (at most two):** 1 = read / repeat the question, 2 = next question (skip). There is no third tap: "done" is detected by the writing stopping, or by voice.
 **Haptic commands:** `LOCK` (one-shot), `WARN` (continuous), `COMPLETE` (one-shot), `GUIDE_LEFT`, `GUIDE_RIGHT`, `GUIDE_BOTH`, `OFF`.
 
 **Serial (115200, `\n`-terminated):**
@@ -79,9 +79,9 @@ Coordinate space everywhere: **page-normalized** (0,0 top-left of paper → 1,1 
 | Direction | Line | Meaning |
 |---|---|---|
 | Arduino→PC | `READY` | booted (also reply to `PING`) |
-| Arduino→PC | `S,<ms>,<ax>,<ay>,<az>,<light>` | raw sample, ~50 Hz, g and raw ADC |
+| Arduino→PC | `S,<ms>,<ax>,<ay>,<az>` | raw sample, ~33 Hz, in g (no light value; the contract parser still accepts an old 6th field) |
 | Arduino→PC | `M,<STATE>` | motion state **changed** |
-| Arduino→PC | `T,<1\|2\|3>` | tap gesture |
+| Arduino→PC | `T,<1\|2>` | tap gesture (1 = read question, 2 = next question) |
 | PC→Arduino | `H,<CMD>` | play haptic pattern |
 | PC→Arduino | `PING` | liveness |
 
@@ -115,7 +115,7 @@ Coordinate space everywhere: **page-normalized** (0,0 top-left of paper → 1,1 
 | NAVIGATING | motion = **WRITING** | `Silence()` | WRITING |
 | WRITING | motion = WRITING **and** write_status = OUTSIDE | `Haptic(WARN)` | WRITING |
 | WRITING | otherwise | `Haptic(OFF)` | WRITING |
-| WRITING | not WRITING for ≥ 2.0 s **or** tap 3 / "done" | `Haptic(OFF)`, `Snapshot(q.id)` | AUDITING |
+| WRITING | not WRITING for ≥ 2.0 s **or** voice "done" | `Haptic(OFF)`, `Snapshot(q.id)` | AUDITING |
 | AUDITING | result.ink_present | `Speak("Answer recorded.")`, `Haptic(COMPLETE)` | IDLE (next q) / COMPLETE |
 | AUDITING | result.ink_present = False | `Speak("I did not find writing…")` | NAVIGATING |
 | AUDITING | timeout 8 s | `Speak("I could not check…")`, `Haptic(COMPLETE)` | next |
@@ -130,9 +130,9 @@ The brain **never speaks during WRITING** and **never fires WARN unless the IMU 
 - Initialise `Wire.h`, **MMA7660 at I²C `0x4C`** (found by the bus scan; the module is the Grove 3-Axis Digital Accelerometer, not a LIS3DH), up to 120 Hz, ±1.5 g. The output is only 6-bit (about 21.33 counts per g, ~47 mg steps), so it is coarse: check early that WRITING jitter and taps are still visible (see the hardware notes below). Serial 115200.
 - **Non-blocking loop, no `delay()`.** Sample at 100 Hz, emit `S,…` every 2nd sample.
 - **Motion classifier** over a ~0.3 s rolling window of |a|: STILL (tiny variance), MOVING (large, low-frequency), WRITING (small-to-medium, sustained high-frequency jitter, 5–20 Hz), LIFTED (gravity vector shifted from baseline / z spike). Hysteresis: a state must hold ~100 ms to be emitted; emit `M,<STATE>` on change only.
-- **Tap detector:** spike in |a| deviation > ~0.4 g lasting < 60 ms; group spikes within 500 ms; emit `T,n` after 500 ms of quiet.
+- **Tap detector:** spike in |a| deviation > ~0.4 g lasting < 60 ms; group spikes within 500 ms; emit `T,n` (n = 1 or 2) after 500 ms of quiet. Three or more spikes cancel the gesture and nothing is sent, so writing can never be mistaken for a command. Tap 2 means "next question" (skip), so a false positive costs a skipped question: that is why a spike must follow a quiet moment.
 - **Haptic engine:** the table in §3, non-blocking via `tone()` timing, with the 1500 ms dead-man for repeating patterns.
-- Light sensor A0 value goes out in `S` (HUD + future edge detection). *Stretch:* local sub-10 ms edge buzz when the light value jumps while WRITING (box border crossing), only if everything else is solid.
+- **No light or UV sensor.** The probe is accelerometer-only, so there is no ink-edge detection on the device.
 
 ### 5.2 `ArduinoImuLink` (PC side of the pen) — Dev 1
 - Auto-detect the serial port (fallback to `config.ARDUINO_PORT`), reader thread, `parse_device_line()` from the contract, thread-safe event queue.
@@ -165,7 +165,7 @@ The brain **never speaks during WRITING** and **never fires WARN unless the IMU 
 - `submit()` returns immediately; a worker thread crops the snapshot to the box (+10 % margin), asks Gemini 2.5 Flash (structured output) "is there handwriting inside the box / just outside it?", `poll()` returns the `AuditResult` once. 6 s timeout → **pixel fallback** (dark-pixel fraction inside the inset box vs a threshold).
 
 ### 5.9 `System` + `main.py` + HUD — Dev 4
-- `System.step()` (already written) is the only place components meet. `main.py` = CLI (`--real …`), `RealClock`, start/stop, 50 Hz loop, `--debug-keys` (keys 1–4 inject STILL/MOVING/WRITING/LIFTED, `t` injects tap 3, so a dead sensor can't kill the demo).
+- `System.step()` (already written) is the only place components meet. `main.py` = CLI (`--real …`), `RealClock`, start/stop, 50 Hz loop, `--debug-keys` (keys 1–4 inject STILL/MOVING/WRITING/LIFTED, `t` injects tap 2, so a dead sensor can't kill the demo).
 - **HUD (cv2):** camera view + answer boxes + pen dot + 2 s trail; big phase banner (READING / NAVIGATING / WRITING_LOCKED / OUT_OF_BOUNDS / AUDITING); current question text; **IMU panel** (motion state, accel waveform, tap flashes); haptic log; last audit result.
 
 ### 5.10 Physical setup — shared (assigned below)
@@ -186,14 +186,14 @@ Times are hackathon hours; if you start later than H12, shrink the first block.
 | 1.1 | Sketch skeleton: `Wire.h`, MMA7660 @0x4C, ~100 Hz, non-blocking loop, `S` stream @50 Hz, `READY` (a working accelerometer-only sketch is already in `accel_stream/`) | 1.0 h |
 | 1.2 | **Mount the probe on the pen**, then `tools/imu_record.py`: record labeled CSV for STILL / MOVING / WRITING / LIFTED with the real pen on real paper (≥ 30 s each) | 1.5 h |
 | 1.3 | Motion classifier + hysteresis, thresholds tuned from the recordings; `M,` events | 2.0 h |
-| 1.4 | Tap detector (1/2/3) → `T,n` | 1.5 h |
+| 1.4 | Tap detector (1 or 2 taps) → `T,n` | 1.5 h |
 | 1.5 | Haptic pattern engine (§3) + dead-man timeout | 1.5 h |
 | 1.6 | `ArduinoImuLink` (thread, parser, reconnect, `recent_samples`, `send`) | 1.5 h |
 | 1.7 | Tests + hardening: replay recorded lines through `parse_device_line`; unplug/replug; 10-min soak | 1.0 h |
 
-**Test without anyone else:** serial monitor — type `H,LOCK` and hear it; hold still / move / write and watch `M,` lines; tap 3× and see `T,3`. In Python: `python -m src.sim --real imu` (fake everything else; haptics you hear are the brain's real commands from the scripted world).
+**Test without anyone else:** serial monitor — type `H,LOCK` and hear it; hold still / move / write and watch `M,` lines; tap once and twice and see `T,1` / `T,2`. In Python: `python -m src.sim --real imu` (fake everything else; haptics you hear are the brain's real commands from the scripted world).
 **Done when:** classifier gets ≥ 90 % of a 60 s scripted routine (still → move → write → lift) right, taps are detected ≥ 9/10, patterns are audibly distinct, link survives replug, sim passes with `--real imu`.
-**Hard deadline: working classifier by H15.** Fallback if WRITING can't be separated from MOVING: emit only STILL/MOVING/LIFTED and let tap-3 mean "done" (the brain already handles this).
+**Hard deadline: working classifier by H15.** Fallback if WRITING can't be separated from MOVING: set `EMIT_WRITING = false` (firmware reports only STILL/MOVING) and rely on voice "done". There is no tap-3 any more, so without WRITING the brain cannot see the answer finish by itself.
 
 ### DEV 2 — Vision & Geometry: tracker, calibration, guidance, prescan
 **Owns:** `src/tracker.py`, `src/guidance.py`, `src/prescan.py`, `tools/calibrate_page.py`, `tools/tune_marker.py`, `data/page_calibration.json`, `data/layout.json`, `tests/test_guidance.py`. (Reuses/edits `camera.py`, `vision_agent.py`.)
@@ -234,7 +234,7 @@ Times are hackathon hours; if you start later than H12, shrink the first block.
 | # | Task | Est |
 |---|---|---|
 | 4.1 | Drop in contract files, get the team to run `python -m src.sim` (H12). Replace the broken `main.py`: CLI `--real`, RealClock, 50 Hz loop, clean shutdown | 1.5 h |
-| 4.2 | `--debug-keys` injector (keys inject motion states and tap 3) so any dead sensor can be bypassed on stage | 0.5 h |
+| 4.2 | `--debug-keys` injector (keys inject motion states and tap 2) so any dead sensor can be bypassed on stage | 0.5 h |
 | 4.3 | HUD: camera view + boxes + pen + trail, phase banner, question text | 2.0 h |
 | 4.4 | HUD IMU panel: motion state, accel waveform, tap flashes, haptic log, audit result | 1.5 h |
 | 4.5 | `GeminiAuditor`: worker thread, crop + structured Gemini call, pixel fallback, tests on saved photos | 2.5 h |
@@ -263,7 +263,7 @@ Times are hackathon hours; if you start later than H12, shrink the first block.
 
 | If this breaks | Do this | Cost |
 |---|---|---|
-| WRITING vs MOVING unreliable | firmware emits STILL/MOVING/LIFTED only; **tap 3 = done** | none visible |
+| WRITING vs MOVING unreliable | firmware emits STILL/MOVING only (`EMIT_WRITING = false`); **voice "done"** ends the answer | no automatic silence while writing |
 | Taps unreliable | voice "done" (already mapped) | slightly less pure |
 | Accelerometer dead | `--debug-keys` injection from a teammate's keyboard | cheating, but the demo runs |
 | Pen marker lost / bad light | `--real` without tracker, use the fake world + hand-steer | no live guidance |
@@ -277,7 +277,7 @@ Times are hackathon hours; if you start later than H12, shrink the first block.
 2. Hand moves: buzzers pulse left/right, voice says "Move 2 inches Down." (**MOVING** → guidance on.)
 3. Pen enters the box, stops: double-tone **LOCK**, "In the answer box. Start writing."
 4. Writing: voice goes **silent**. Pen drifts past the margin → harsh **WARN**; correct → stops. (HUD shows `WRITING` from the IMU while the camera loses the pen under the hand — *this is the pitch*.)
-5. Triple tap → audit → "Answer recorded." ascending **COMPLETE** tone.
+5. Writing stops (or the student says "done") → audit → "Answer recorded." ascending **COMPLETE** tone.
 6. Show the HUD IMU panel: "the pen knows what it's doing; the camera knows where it is."
 
 **Say latency honestly:** "sub-10 ms haptic response on the device; ~50 ms end-to-end guidance" (the camera is 30 FPS ≈ 33 ms per frame).
@@ -311,9 +311,9 @@ Changes from the original plan, found while bringing up the hardware (Oct 2026):
 | Accelerometer | LIS3DH, I²C `0x18` | **MMA7660, I²C `0x4C`** (Grove 3-Axis Digital Accelerometer), 6-bit, about 21.33 counts/g, ±1.5 g, up to 120 Hz |
 | Upload path | USB DFU | UNO Q uploads over `adb`; board package `arduino:zephyr:unoq`, serial port shows up as COM4 on Windows |
 
-Working code: `accel_stream/accel_stream.ino` streams `A,<ms>,<x_g>,<y_g>,<z_g>` at 50 Hz and was confirmed on the real UNO Q. Task 1.1 turns it into the contract's `READY` / `S,…` format with the A0 light value added.
+Working code: `accel_stream/accel_stream.ino` streams `A,<ms>,<x_g>,<y_g>,<z_g>` at 50 Hz and was confirmed on the real UNO Q. Task 1.1 turns it into the contract's `READY` / `S,…` format (accelerometer values only).
 
 Known issues and open questions:
 - **Uploads to the UNO Q are intermittent**: sometimes `adb.exe: device offline`, then working again with no clear change. Workaround: unplug, wait about 60 s for the board to boot, try again; close the Serial Monitor before using the port from scripts.
 - **Coarse accelerometer.** About 47 mg per step with a ±1.5 g range. WRITING jitter and 0.4 g tap spikes may be harder to see or may clip. Record data early (task 1.2) before trusting any threshold. The kill switches in §8 still apply.
-- **Not yet verified on the UNO Q:** that `tone()` can drive both buzzers (D3, D4) at the same time, and the range of the A0 light-sensor reading (it may differ from the 10-bit values the old test sketch assumed).
+- **Not yet verified on the UNO Q:** that `tone()` can drive both buzzers (D3, D4) at the same time.
