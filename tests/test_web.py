@@ -17,7 +17,8 @@ from src.web import Snapshotter, WebBridge, encode_frame
 
 Q, L = sample_questions(), sample_layout()
 TOP_KEYS = {"v", "source", "t", "phase", "motion", "question", "progress", "boxes", "pen", "guidance",
-            "haptic", "voice", "imu", "taps", "audit", "events", "health", "debug", "camera"}
+            "haptic", "voice", "imu", "taps", "tap_stats", "pen_link", "audit", "events", "health", "debug",
+            "camera"}
 
 
 def make(debug=False, render=True):

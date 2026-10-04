@@ -49,6 +49,7 @@ class System:
         self.last_audit: Optional[Tuple[float, AuditResult]] = None   # (t, result) for the HUD
         self.errors: Dict[str, int] = {}                # component -> failure count
         self.last_error: str = ""
+        self.component_errors: Dict[str, str] = {}      # component -> its last error message
         self._last_phase: Optional[Phase] = None
 
     # ------------------------------------------------------------------ lifecycle
@@ -72,6 +73,7 @@ class System:
             comp = comp or what.split(".")[0]
             n = self.errors[comp] = self.errors.get(comp, 0) + 1
             self.last_error = f"{what}: {type(e).__name__}: {e}"
+            self.component_errors[comp] = self.last_error
             if n == 1:
                 print(f"[system] {self.last_error}", file=sys.stderr)
                 traceback.print_exc()

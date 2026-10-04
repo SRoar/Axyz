@@ -149,6 +149,16 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   box-shadow: var(--lift);
 }
 .lost { background: var(--ink-850); color: var(--text-1); }
+.page-search { position: absolute; left: 50%; top: var(--sp-4); translate: -50% 0; width: min(92%, 360px); display: grid; gap: 6px;
+  padding: var(--sp-3) var(--sp-4); border-radius: var(--r-2); background: var(--ink-850); color: var(--text-2); font-size: var(--fs-1); box-shadow: var(--lift); }
+.page-search b { color: var(--text-1); font-size: var(--fs-2); font-weight: 600; }
+.ps-bar { height: 6px; border-radius: 3px; background: var(--ink-700, #333); overflow: hidden; }
+.ps-bar i { display: block; height: 100%; width: 0; background: var(--good); transition: width 200ms linear; }
+.page.is-searching .boxes, .page.is-searching .pen, .page.is-searching .trail { visibility: hidden; }
+.pen-link { float: right; font-size: var(--fs-1); font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--text-3); }
+.pen-link[data-state="ok"] { color: var(--good); }
+.pen-link[data-state="bad"] { color: var(--warn, #e5484d); }
+.tap-last { margin-top: var(--sp-2); font-size: var(--fs-1); color: var(--text-2); font-variant-numeric: tabular-nums; }
 .lost b { color: var(--writing); font-weight: 600; }
 .reach { display: inline-flex; align-items: center; gap: var(--sp-3); background: var(--ink-850); color: var(--text-1); bottom: 27%; font-size: var(--fs-3); padding: var(--sp-3) var(--sp-4); }
 .reach .icon { color: var(--pen); }

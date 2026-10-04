@@ -1,4 +1,4 @@
-"""VoiceEngine: streaming ElevenLabs TTS with macOS say fallback.
+"""VoiceEngine: streaming ElevenLabs TTS, with an offline fallback (macOS `say`, Windows System.Speech).
 
 Speaks only (PLAN.md 5.7): no microphone, no speech recognition. The student commands the
 system with pen taps, so poll_command() always returns None.
@@ -7,6 +7,7 @@ system with pen taps, so poll_command() always returns None.
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 from typing import Dict, Optional, Tuple
@@ -53,7 +54,7 @@ class VoiceEngine:
             except Exception as e:
                 print(f"[VoiceEngine] ElevenLabs initialization error: {e}")
         if not self.client:
-            print("[VoiceEngine] ElevenLabs unavailable. Using macOS 'say' fallback.")
+            print(f"[VoiceEngine] ElevenLabs unavailable. Using the offline {self._offline_name()} voice.")
 
         self._start_tts_worker()
 
@@ -133,23 +134,35 @@ class VoiceEngine:
             if path and os.path.exists(path):
                 os.remove(path)
 
-    def _run_process(self, cmd, gen: int):
+    def _run_process(self, cmd, gen: int, env=None):
         try:
             with self._lock:
                 if self._cancelled(gen):
                     return
-                proc = subprocess.Popen(cmd)
+                proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL)
                 self._current_process = proc
             proc.wait()
         finally:
             with self._lock:
                 self._current_process = None
 
+    @staticmethod
+    def _offline_name() -> str:
+        return "Windows System.Speech" if sys.platform == "win32" else "macOS 'say'"
+
     def _play_say_fallback(self, phrase: str, gen: int):
+        """Offline voice. silence() terminates the process, which stops the speech mid-phrase."""
         try:
-            self._run_process(["say", phrase], gen)
+            if sys.platform == "win32":
+                # the text goes in through the environment, so quotes in a question can't break the command
+                ps = ("Add-Type -AssemblyName System.Speech; "
+                      "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak($env:ILLUMIN_SAY)")
+                self._run_process(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], gen,
+                                  env={**os.environ, "ILLUMIN_SAY": phrase})
+            else:
+                self._run_process(["say", phrase], gen)
         except Exception as e:
-            print(f"[VoiceEngine] System 'say' failed: {e}")
+            print(f"[VoiceEngine] offline {self._offline_name()} voice failed: {e}")
 
     def _start_tts_worker(self):
         def worker():

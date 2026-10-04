@@ -98,7 +98,9 @@ class DebugImu:
         self.override = m
 
     def inject_tap(self, tap: Tap) -> None:
-        self._pending.append(ImuEvent(self.clock.now(), tap=tap))
+        ev = ImuEvent(self.clock.now(), tap=tap)
+        ev.injected = True                  # the HUD labels keyboard taps so they are never mistaken for the pen's
+        self._pending.append(ev)
 
     def release(self) -> None:
         self.override = None

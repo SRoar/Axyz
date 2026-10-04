@@ -37,12 +37,16 @@ tests/test_web.py compares the two key-sets so they cannot drift)
     voice        {speaking, level, level_source, text}   level 0..1 or null; "real" | "synthetic"
     imu          {samples: [[ax, ay, az], ...]}   (accelerometer only)
     taps         [{age_s, n}]                  taps in the last 1.6 s
+    tap_stats    {single, double, keyboard, last: {n, age_s, keyboard} | null}   every tap since start
+                 (single/double = reported by the pen; keyboard = injected with --debug-keys)
+    pen_link     {kind, connected, port, lines_per_s, error}   kind: "serial" (real pen) | "fake"
     audit        {question_id, ink_present, ink_outside, confidence, note, age_s} | null
     events       [{seq, t, kind, text}]        newest 40 log lines (PHASE SPEAK SILENCE HAPTIC
                  BOX SNAPSHOT AUDIT ERROR); the UI dedupes by seq
     health       {errors: {component: n}, last_error}
     debug        {enabled, override}
-    camera       {has_frame, label, rectified}
+    camera       {has_frame, label, rectified, page_found, page_search}   page_found = page calibrated
+                 (frame is the straightened page); page_search = 0..1 progress while looking for it
 """
 from __future__ import annotations
 
@@ -84,6 +88,10 @@ class Snapshotter:
         self._seq = 0
         self._events: Deque[Dict[str, Any]] = deque(maxlen=EVENT_KEEP)
         self._taps: Deque[Tuple[float, int]] = deque(maxlen=8)
+        self._tap_counts = {1: 0, 2: 0}
+        self._key_taps = 0
+        self._last_tap: Optional[Tuple[float, int, bool]] = None
+        self._rate = (None, 0, 0.0)                     # (t, lines_seen, lines/s) for the pen link
         self._last_inputs_t: Optional[float] = None
         self._haptic: Tuple[float, str] = (-1e9, "OFF")
         self._haptic_seq = 0
@@ -102,7 +110,20 @@ class Snapshotter:
             self._last_inputs_t = inp.t
             for e in inp.imu_events:
                 if e.tap != Tap.NONE:
-                    self._taps.append((now, int(e.tap)))
+                    n, typed = int(e.tap), bool(getattr(e, "injected", False))
+                    self._taps.append((now, n))
+                    self._last_tap = (now, n, typed)
+                    if typed:
+                        self._key_taps += 1
+                    else:
+                        self._tap_counts[n] = self._tap_counts.get(n, 0) + 1
+        seen = getattr(s.c.imu, "lines_seen", None)
+        if seen is not None:
+            t0, n0, rate = self._rate
+            if t0 is None:
+                self._rate = (now, seen, 0.0)
+            elif now - t0 >= 1.0:
+                self._rate = (now, seen, (seen - n0) / (now - t0))
         rd = s.reading
         if rd is not None and rd.frame is not None:
             self._frame, self._frame_id = rd.frame, self._frame_id + 1
@@ -213,18 +234,44 @@ class Snapshotter:
                       "level_source": level_source, "text": self._voice_text},
             "imu": {"samples": samples},
             "taps": [{"age_s": _r(now - t), "n": n} for t, n in self._taps if now - t < TAP_SHOW_S],
+            "tap_stats": {"single": self._tap_counts.get(1, 0), "double": self._tap_counts.get(2, 0),
+                          "keyboard": self._key_taps,
+                          "last": ({"n": self._last_tap[1], "age_s": _r(now - self._last_tap[0], 1),
+                                    "keyboard": self._last_tap[2]} if self._last_tap else None)},
+            "pen_link": self._pen_link(),
             "audit": audit,
             "events": list(self._events),
             "health": {"errors": dict(s.errors), "last_error": s.last_error},
             "debug": {"enabled": self.debug is not None,
                       "override": (getattr(getattr(self.debug, "override", None), "value", None)
                                    if self.debug is not None else None)},
-            "camera": {"has_frame": self._frame is not None,
-                       "label": str(getattr(c.tracker, "source_name", "Overhead camera")),
-                       "rectified": True},
+            "camera": self._camera(),
         }
 
     # ------------------------------------------------------------------ helpers
+    def _pen_link(self) -> Dict[str, Any]:
+        imu = self.s.c.imu
+        connected = getattr(imu, "connected", None)
+        if connected is None:
+            return {"kind": "fake", "connected": True, "port": "", "lines_per_s": 0.0, "error": ""}
+        return {"kind": "serial", "connected": bool(connected), "port": str(getattr(imu, "port_name", "") or ""),
+                "lines_per_s": _r(self._rate[2], 1), "error": str(getattr(imu, "last_error", "") or "")}
+
+    def _camera(self) -> Dict[str, Any]:
+        tr = self.s.c.tracker
+        found, progress = True, 1.0
+        fn = getattr(tr, "calibration_status", None)
+        if callable(fn):                                   # real tracker: is the page calibrated yet?
+            try:
+                searching, prog, _ = fn()
+                found = getattr(tr, "calibration", None) is not None
+                progress = 1.0 if found and not searching else float(prog)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"has_frame": self._frame is not None,
+                "label": str(getattr(tr, "source_name", "Overhead camera")),
+                "rectified": found, "page_found": found, "page_search": _r(progress, 2)}
+
     def _voice_level(self) -> Tuple[Optional[float], str]:
         """Optional Voice.level() (0..1, RMS of the audio playing now).  Dev 3 may add it; the UI
         synthesises a speech-like envelope from `speaking` until then."""

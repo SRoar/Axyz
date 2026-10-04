@@ -137,6 +137,7 @@
           <p class="cam-label"><span class="cam-dot" aria-hidden="true"></span><span id="camLabel">Overhead camera</span></p>
 
           <p class="lost t-badge" id="lost" role="status"></p>
+          <p class="page-search t-badge" id="pageSearch" role="status"><b>Looking for the page</b><span>Whole sheet in view, hands out, hold still.</span><span class="ps-bar"><i id="pageSearchBar"></i></span></p>
           <p class="reach t-badge" id="reach" role="status"><svg class="icon" aria-hidden="true"><use href="#i-pen"/></svg><span>Pick up the pen</span></p>
         </div>
       </div>
@@ -153,7 +154,7 @@
     <!-- Right: what the pen is doing, what it is telling the hand, and what the camera concluded -->
     <aside class="rail rail-right" aria-label="Pen and feedback">
       <section class="sec imu" id="imuSec" data-motion="STILL">
-        <h2>Pen probe</h2>
+        <h2>Pen probe <span class="pen-link" id="penLink" data-state="fake"></span></h2>
         <div class="imu-state">
           <span class="t-icon-slot imu-icon" id="imuIcon">
             <svg class="icon t-icon" data-k="STILL"><use href="#i-still"/></svg>
@@ -170,6 +171,7 @@
             <li data-n="2"><span class="tap-pips"><i></i><i></i></span>next</li>
           </ul>
         </div>
+        <p class="tap-last" id="tapLast" role="status">No tap yet</p>
       </section>
 
       <section class="sec buzz" id="buzzSec">

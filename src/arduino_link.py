@@ -78,6 +78,7 @@ class ArduinoImuLink:
         self._thread: Optional[threading.Thread] = None
         self.last_error: str = ""
         self.lines_seen = 0
+        self.port_name: str = ""                 # the port actually opened (for the HUD / preflight)
 
     # ---- ImuLink contract -------------------------------------------------------------
     @property
@@ -133,6 +134,7 @@ class ArduinoImuLink:
         port = find_port(self._port)
         if port is None:
             raise OSError("no Arduino serial port found")
+        self.port_name = port
         # short read timeout: the same thread also writes queued haptic lines, so this bounds their latency
         return serial.Serial(port, self._baud, timeout=0.02, write_timeout=0.5)
 

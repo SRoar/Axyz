@@ -56,6 +56,7 @@ SEARCH_DEBUG_PATH = "data/page_search_failed.png"
 SEARCH_EVERY_S = 0.05   # page-finding rate while searching
 WATCH_EVERY_S = 0.15    # ... and afterwards, while watching for a moved page
 RELOCK_PX = 8.0         # a page seen this far from the calibrated corners is re-locked
+CAMERA_RETRY_S = 3.0    # camera failed to start (phone locked, app not streaming): retry this often
 
 
 @dataclass
@@ -183,6 +184,7 @@ class PenTracker:
         self.record_path = record_path
         self._rec: Any = None
         self._rec_flush_t = 0.0
+        self.camera_error = ""                 # why the camera isn't streaming yet ("" = it is)
 
     # ------------------------------------------------------------------ contract
     def start(self) -> None:
@@ -190,7 +192,15 @@ class PenTracker:
             return
         if self.cam is None:
             self.cam = make_camera(self.camera_cfg or load_camera_config(), time_fn=self.clock.now)
-        self.cam.start()
+        try:
+            self.cam.start()
+            self.camera_error = ""
+        except Exception as e:
+            # e.g. the iPhone is locked or Record3D isn't streaming yet: keep retrying instead of
+            # running the whole demo without a camera (the HUD shows camera_error meanwhile)
+            self.camera_error = f"{type(e).__name__}: {e}"
+            print(f"[tracker] camera not ready ({self.camera_error}); retrying every {CAMERA_RETRY_S:.0f} s")
+            threading.Thread(target=self._retry_camera, name="camera-retry", daemon=True).start()
         if self._searching:
             print("[tracker] looking for the page: whole sheet in view, hands out, hold still...")
         elif self._calib_file is None:
@@ -203,6 +213,18 @@ class PenTracker:
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="pen-tracker", daemon=True)
         self._thread.start()
+
+    def _retry_camera(self) -> None:
+        while True:
+            time.sleep(CAMERA_RETRY_S)              # sleep first: start() sets _running after spawning this
+            if not self._running or not self.camera_error:
+                return
+            try:
+                self.cam.start()
+                self.camera_error = ""
+                print("[tracker] camera connected")
+            except Exception as e:  # noqa: BLE001
+                self.camera_error = f"{type(e).__name__}: {e}"
 
     def stop(self) -> None:
         self._running = False

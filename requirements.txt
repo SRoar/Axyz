@@ -1,6 +1,8 @@
+# Python 3.13 (record3d and pyaudio have no wheels for 3.14 yet)
 opencv-python>=4.9.0
 numpy>=1.26.0
 pyserial>=3.5
+record3d>=1.4.1            # iPhone RGB-D over USB (Windows: also needs Apple's driver, see demo/DEMO_SCRIPT.md)
 pyaudio>=0.2.14        # audio OUTPUT only (streamed TTS); there is no microphone input
 google-genai>=0.1.1
 pydantic>=2.6.0

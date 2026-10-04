@@ -174,6 +174,7 @@
       currentBox: null, log: [], seq: 0, haptic: { t: -1e9, cmd: "OFF" }, hseq: 0, tapsShown: [],
       status: {}, prevIndex: 0, lastAudit: null, pendingAudit: [], samples: [], nextSample: 0, ink: [], inkLast: null, lastPen: null,
       lastMotion: S, speakingNow: false, lastPhase: null, all: [],
+      tapCounts: { 1: 0, 2: 0 }, keyTaps: 0, lastTap: null,
     };
     QUESTIONS.forEach((q) => (sys.status[q.id] = "pending"));
     let rng = 7;
@@ -208,6 +209,7 @@
     function restart() {
       brain.reset(); sys.lastPhase = null; sys.worldStart = sys.simT; sys.tapsDone = 0; sys.currentBox = null; sys.override = null;
       sys.ink = []; sys.inkLast = null; sys.lastAudit = null; sys.pendingAudit = []; sys.prevIndex = 0; sys.voiceFreeAt = 0;
+      sys.tapCounts = { 1: 0, 2: 0 }; sys.keyTaps = 0; sys.lastTap = null;
       QUESTIONS.forEach((q) => (sys.status[q.id] = "pending"));
     }
 
@@ -221,8 +223,14 @@
       while (sys.tapsDone < TAPS.length && TAPS[sys.tapsDone][0] <= ts) {
         const n = TAPS[sys.tapsDone][1]; sys.tapsDone++; events.push(n);
       }
+      const scripted = events.length;
       sys.pendingTaps.splice(0).forEach((n) => events.push(n));
-      events.forEach((n) => sys.tapsShown.push({ t: now, n }));
+      events.forEach((n, i) => {
+        const keyboard = i >= scripted;                  // keys from the UI menu, like --debug-keys
+        sys.tapsShown.push({ t: now, n });
+        sys.lastTap = { t: now, n, keyboard };
+        if (keyboard) sys.keyTaps += 1; else sys.tapCounts[n] = (sys.tapCounts[n] || 0) + 1;
+      });
       while (sys.nextSample <= now) { sys.samples.push(sample(sys.nextSample, motion)); if (sys.samples.length > 80) sys.samples.shift(); sys.nextSample += 0.02; }
 
       const pen = w.pen;
@@ -278,11 +286,14 @@
         voice: { speaking: now < sys.voiceFreeAt, level: null, level_source: "synthetic", text: sys.voiceText },
         imu: { samples: sys.samples.map((s) => s.map((v) => r(v))) },
         taps: sys.tapsShown.filter((t) => now - t.t < 1.6).map((t) => ({ age_s: r(now - t.t), n: t.n })),
+        tap_stats: { single: sys.tapCounts[1] || 0, double: sys.tapCounts[2] || 0, keyboard: sys.keyTaps,
+          last: sys.lastTap ? { n: sys.lastTap.n, age_s: r(now - sys.lastTap.t, 1), keyboard: sys.lastTap.keyboard } : null },
+        pen_link: { kind: "fake", connected: true, port: "", lines_per_s: 0, error: "" },
         audit: la ? { question_id: la.result.question_id, ink_present: la.result.ink_present, ink_outside: la.result.ink_outside, confidence: la.result.confidence, note: la.result.note, age_s: r(now - la.t, 2) } : null,
         events: sys.log.slice(),
         health: { errors: {}, last_error: "" },
         debug: { enabled: true, override: sys.override },
-        camera: { has_frame: false, label: "Demo camera", rectified: true },
+        camera: { has_frame: false, label: "Demo camera", rectified: true, page_found: true, page_search: 1 },
       };
     }
 

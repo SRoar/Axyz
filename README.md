@@ -9,13 +9,16 @@ Full design, contract, transition table and per-dev workstreams: **[PLAN.md](PLA
 
 ## Quick start
 ```bash
-pip install -r requirements.txt            # + `pip install pytest` for the tests
+pip install -r requirements.txt            # Python 3.13 (record3d / pyaudio have no 3.14 wheels yet)
 cp .env.example .env                       # GEMINI_API_KEY, ELEVENLABS_API_KEY, ARDUINO_PORT, CAMERA_INDEX
 
 python -m src.sim                          # headless full-flow check, ~1 s  -> must print SIM PASS
 pytest -q                                  # unit + integration tests
 python -m src.main                         # HUD on ALL FAKES (scripted world)
 ```
+
+With the hardware plugged in (iPhone streaming in Record3D, pen on USB): `python tools/preflight.py --taps`,
+then `python -m src.main --real all --debug-keys` (one window: the HUD). Setup and what to look for: [demo/DEMO_SCRIPT.md](demo/DEMO_SCRIPT.md).
 
 ## Running real components
 Every component is the real class or a fake, chosen with one flag (names: `imu tracker guidance voice brain auditor`, or `all`):

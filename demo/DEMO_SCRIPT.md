@@ -3,14 +3,34 @@
 **Roles:** *Operator* (laptop, `--debug-keys` hand on the keyboard) · *Student* (blindfolded, holds the pen) · *Narrator* (talks to judges).
 **Screen:** HUD full-screen, readable from 2 m. **Say latency honestly:** "sub-10 ms haptic response on the device; ~50 ms end-to-end guidance."
 
+## One-time setup on the demo laptop (Windows)
+1. **Python 3.13** (record3d and pyaudio have no 3.14 wheels): `py -3.13 -m venv .venv313`, then
+   `.venv313\Scripts\python -m pip install -r requirements.txt`. Run every command below with that Python.
+2. **Apple's USB driver** for the iPhone: install the *Apple Devices* app (Microsoft Store) or iTunes. Without it
+   Record3D prints `usbmuxd ... error opening socket` and no iPhone is ever found.
+3. **iPhone:** Record3D app with *USB Streaming* (Settings), phone unlocked, "Trust this computer" accepted.
+4. **Pen:** UNO Q flashed with `firmware/illumin_pen`; it shows up as a COM port (COM4 here). Optional:
+   `ARDUINO_PORT=COM4` in `.env` (otherwise it is auto-detected). Close the Arduino IDE Serial Monitor.
+5. `.env` from `.env.example`. Without keys the demo still runs: offline Windows voice, pixel answer check.
+6. **Which sheet?** `data/questions.json` + `data/layout.json` are the sheet Dev 2 prescanned (5 short questions).
+   To use the printed `demo/test_sheet.pdf` instead, add
+   `--questions demo/questions.demo.json --layout demo/layout.sheet.json` to the run command
+   (or re-run `python -m src.prescan` with that sheet under the camera).
+
 ## Pre-flight (10 min before, every time)
-1. `git pull`, `python -m src.sim` → **SIM PASS**; `pytest -q` green.
-2. Print `demo/test_sheet.pdf` at **100 %** (Letter, *no* "fit to page"). Tape it down. Diffuse light, no glare on the boxes.
-3. Pen probe taped on and **not touched again**. Pen marker colour appears nowhere else on the desk.
-4. Camera fixed → re-run page calibration (4 clicks). Check `data/layout.json` matches the sheet (`demo/layout.sheet.json` is the ground truth).
-5. `.env` has both API keys; volume up; headphones **out**; mic on.
-6. Dry run: `python -m src.main --real all --debug-keys` → HUD shows all chips `ok` (BRA IMU TRA GUI VOI AUD).
-7. Press `s` once to confirm screenshots land in `captures/`. Start the screen recording (`--record demo_run.mp4` or OS recorder).
+1. iPhone streaming in Record3D (red button), pen plugged in, sheet taped down, diffuse light, no glare.
+2. `python tools/preflight.py --taps` → no `FAIL`. It checks the packages, sheet files, keys, the pen stream
+   (~33 lines/s, a LOCK beep, then asks for one tap and two taps), the iPhone frames + LiDAR depth, the
+   page lock (hands out!) and the pen tip, and speaks a test line. Look at `captures/preflight_page.png`.
+3. Probe taped on the pen and **not touched again**.
+4. Run: `python -m src.main --real all --debug-keys` (add the sheet flags from step 6 above if needed). One window: the HUD.
+   * HUD camera panel: "LOOKING FOR THE PAGE" until the sheet locks (hands out, ~2 s still), then the
+     straightened page with the answer boxes and a red dot on the pen tip (off the paper: red arrow + side).
+   * HUD pen panel: every tap stays on screen ("last: DOUBLE TAP, 3 s ago") with running counts; keyboard
+     taps are labelled "(keyboard)". Bottom line: `COM4 connected 33 lines/s`, or why it is not connected.
+   * Health chips all `ok` (`IMU no link` = pen unplugged). The camera retries by itself if the phone
+     wasn't streaming yet. (A browser view also exists, `--web`, but the HUD is the demo UI.)
+5. Press `s` once to confirm screenshots land in `captures/`. Start the screen recording (`--record demo_run.mp4` or OS recorder).
 
 ## The 90 seconds
 | t | Student / Operator does | Narrator says | HUD shows |

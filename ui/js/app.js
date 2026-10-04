@@ -229,6 +229,19 @@
       if (!S.tapSeen.has(key)) { S.tapSeen.add(key); if (t.age_s < 0.6) G.tap(t.n); }
     });
     $$("li", el.taps).forEach((li) => li.classList.toggle("is-hit", (snap.taps || []).some((t) => String(t.n) === li.dataset.n)));
+    // every tap since start, so a tester can tell "the pen saw my tap" from "nothing arrived"
+    const ts = snap.tap_stats;
+    if (ts) {
+      const word = { 1: "single", 2: "double" };
+      const last = ts.last ? `Last: ${word[ts.last.n] || ts.last.n + " taps"}${ts.last.keyboard ? " (keyboard)" : ""}, ${Math.round(ts.last.age_s)} s ago` : "No tap yet";
+      el.tapLast.textContent = `${last} · pen: ${ts.single} single, ${ts.double} double${ts.keyboard ? ` · keyboard ${ts.keyboard}` : ""}`;
+    }
+    const pl = snap.pen_link;
+    if (pl) {
+      const state = pl.kind === "fake" ? "fake" : pl.connected ? "ok" : "bad";
+      const text = pl.kind === "fake" ? "demo data" : pl.connected ? `${pl.port || "connected"} · ${Math.round(pl.lines_per_s)}/s` : "not connected";
+      once("penLink", state + text, () => { el.penLink.dataset.state = state; el.penLink.textContent = text; el.penLink.title = pl.error || ""; });
+    }
   }
 
   function renderVoice(snap) {
@@ -320,6 +333,10 @@
 
   function renderCamera(snap) {
     const cam = snap.camera || {};
+    const searching = cam.page_found === false;              // raw camera view: no page coordinates yet
+    el.page.classList.toggle("is-searching", searching);
+    M.badge(el.pageSearch, searching);
+    if (searching) el.pageSearchBar.style.width = Math.round(100 * (cam.page_search || 0)) + "%";
     once("camLabel", cam.label, (v) => (el.camLabel.textContent = v || "Overhead camera"));
     const useImg = !!(S.source && S.source.kind === "live" && cam.has_frame && !S.imgFailed);
     once("useImg", useImg, (v) => {
@@ -346,6 +363,9 @@
     const now = performance.now();
     const snap = S.snap;
     if (!snap || !S.pw) return;
+    // the page can settle to its final size without a ResizeObserver callback (seen at startup):
+    // a stale size puts the pen dot off the real tip, so re-measure whenever the layout changed
+    if (Math.abs(el.page.clientWidth - S.pw) > 0.5 || Math.abs(el.page.clientHeight - S.ph) > 0.5) measure();
 
     // pen glide (smoothing only; the data is already page coordinates)
     if (S.lastPen) {
@@ -534,7 +554,8 @@
 
   /* ================================================================== sizing */
   function measure() {
-    const r = el.page.getBoundingClientRect();
+    // layout size (not getBoundingClientRect): the pen dot is placed in these px, the boxes in %
+    const r = { width: el.page.clientWidth, height: el.page.clientHeight };
     S.pw = r.width; S.ph = r.height; S.dpr = Math.min(2, window.devicePixelRatio || 1);
     [el.trail].forEach((c) => { c.width = Math.round(r.width * S.dpr); c.height = Math.round(r.height * S.dpr); });
     S.trailCtx = el.trail.getContext("2d");
@@ -579,7 +600,8 @@
       ["dockText", "#dockText"], ["wave", "#wave"], ["imuSec", "#imuSec"], ["imuIcon", "#imuIcon"], ["imuLabel", "#imuLabel"], ["imuWave", "#imuWave"],
       ["taps", "#taps"], ["buzzSec", "#buzzSec"], ["lampL", "#lampL"], ["lampR", "#lampR"], ["buzzCmd", "#buzzCmd"],
       ["buzzLog", "#buzzLog"], ["guideSay", "#guideSay"], ["gDx", "#gDx"], ["gDy", "#gDy"], ["gState", "#gState"], ["auditBox", "#auditBox"],
-      ["auditIn", "#auditIn"], ["health", "#health"], ["connBtn", "#connBtn"], ["connLabel", "#connLabel"], ["menu", "#connMenu"], ["menuNote", "#menuNote"],
+      ["auditIn", "#auditIn"], ["health", "#health"], ["pageSearch", "#pageSearch"], ["pageSearchBar", "#pageSearchBar"],
+      ["penLink", "#penLink"], ["tapLast", "#tapLast"], ["connBtn", "#connBtn"], ["connLabel", "#connLabel"], ["menu", "#connMenu"], ["menuNote", "#menuNote"],
     ].forEach(([k, s]) => (el[k] = $(s)));
 
     G.mount();

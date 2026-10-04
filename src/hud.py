@@ -61,6 +61,7 @@ R_GUIDE = (COL_A_X, 532, COL_A_W, 150)
 R_AUDIT = (COL_A_X, 698, COL_A_W, 178)
 R_HAPTIC = (COL_B_X, 186, COL_B_W, 330)
 R_VOICE = (COL_B_X, 532, COL_B_W, 344)
+_BLANK = np.full((H, W, 3), BG, np.uint8)  # built once; render() copies it
 
 
 # --------------------------------------------------------------------------- drawing helpers
@@ -114,6 +115,28 @@ def banner_for(phase: Phase, motion: MotionState, write_status: WriteStatus,
     }[phase]
 
 
+def off_page_side(x: float, y: float) -> Optional[str]:
+    """'LEFT', 'ABOVE RIGHT', ... when the pen tip is off the paper, else None."""
+    v = "ABOVE" if y < 0 else ("BELOW" if y > 1 else "")
+    hz = "LEFT" if x < 0 else ("RIGHT" if x > 1 else "")
+    return f"{v} {hz}".strip() or None
+
+
+def _call(obj, name: str):
+    """obj.name() if the component has that extra (real tracker), else None. Never raises."""
+    fn = getattr(obj, name, None)
+    if not callable(fn):
+        return None
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _component_error(system: System, comp: str) -> str:
+    return (getattr(system, "component_errors", {}) or {}).get(comp, "")
+
+
 # --------------------------------------------------------------------------- the HUD
 class Hud:
     def __init__(self, system: System, debug=None) -> None:
@@ -121,6 +144,12 @@ class Hud:
         self.debug = debug                       # DebugImu or None (shows the override badge)
         self.trail: Deque[Tuple[float, float, float]] = deque()
         self.taps: Deque[Tuple[float, int]] = deque(maxlen=8)
+        self.last_tap: Optional[Tuple[float, int, bool]] = None   # (t, n, typed on the keyboard)
+        self.tap_counts = {1: 0, 2: 0}                            # taps the PEN reported
+        self.key_taps = 0                                         # taps injected with --debug-keys
+        self.link_rate = 0.0                                      # serial lines/s from the pen
+        self._rate_t: Optional[float] = None
+        self._rate_n = 0
         self.haptics: Deque[Tuple[float, str]] = deque(maxlen=60)
         self.voice: Deque[Tuple[float, str]] = deque(maxlen=30)
         self._log_i = 0
@@ -136,11 +165,24 @@ class Hud:
         if inp is not None:
             for e in inp.imu_events:
                 if e.tap != Tap.NONE:
-                    self.taps.append((now, int(e.tap)))
+                    n, typed = int(e.tap), bool(getattr(e, "injected", False))
+                    self.taps.append((now, n))
+                    self.last_tap = (now, n, typed)
+                    if typed:
+                        self.key_taps += 1
+                    else:
+                        self.tap_counts[n] = self.tap_counts.get(n, 0) + 1
             if inp.pen is not None:
                 self.trail.append((now, inp.pen.x, inp.pen.y))
         while self.trail and now - self.trail[0][0] > TRAIL_S:
             self.trail.popleft()
+        seen = getattr(s.c.imu, "lines_seen", None)
+        if seen is not None:
+            if self._rate_t is None:
+                self._rate_t, self._rate_n = now, seen
+            elif now - self._rate_t >= 1.0:
+                self.link_rate = (seen - self._rate_n) / (now - self._rate_t)
+                self._rate_t, self._rate_n = now, seen
         while self._log_i < len(s.log):
             t, kind, text = s.log[self._log_i]
             self._log_i += 1
@@ -153,7 +195,7 @@ class Hud:
 
     # ---------------------------------------------------------------- render
     def render(self) -> np.ndarray:
-        img = np.full((H, W, 3), BG, np.uint8)
+        img = _BLANK.copy()                      # np.full with a colour tuple costs ~20 ms per frame on a slow CPU
         s, inp = self.s, self.s.inputs
         now = s.clock.now()
         phase = s.c.brain.phase
@@ -205,6 +247,10 @@ class Hud:
         for name in ("auditor", "voice", "guidance", "tracker", "imu", "brain"):
             n = s.errors.get(name, 0)
             txt = f"{name[:3].upper()} {'ok' if n == 0 else 'ERR x%d' % n}"
+            if name == "imu" and getattr(s.c.imu, "connected", None) is False:
+                txt, n = "IMU no link", max(n, 1)              # real pen unplugged / not found
+            if name == "tracker" and getattr(s.c.tracker, "camera_error", ""):
+                txt, n = "TRA no cam", max(n, 1)               # iPhone not streaming yet (being retried)
             tw = text_w(txt, 0.5) + 16
             x -= tw + 6
             cv2.rectangle(img, (x, R_QUESTION[1] + 12), (x + tw, R_QUESTION[1] + 38), (50, 90, 50) if n == 0 else (40, 40, 160), -1)
@@ -220,12 +266,34 @@ class Hud:
         iy, ih = y + 36, h - 44
         iw = w - 16
         ix = x + 8
+        tr = s.c.tracker
+        pen = s.inputs.pen if s.inputs else None
+        # real tracker extras (fakes have none of these: their frame is always the page)
+        status = _call(tr, "calibration_status")              # (searching, progress, corners px) or None
+        page_known = status is None or getattr(tr, "calibration", None) is not None
+        stats = _call(tr, "stats") or {}
+        info = []
+        if pen is not None and page_known:
+            info.append(f"tip {pen.x * PAGE_W_CM:.1f}, {pen.y * PAGE_H_CM:.1f} cm")
+        if stats.get("camera_fps"):
+            info.append(f"{stats['camera_fps']:.0f} fps")
+        if info:
+            txt = "   ".join(info)
+            put(img, txt, (x + w - 12 - text_w(txt, 0.5), y + 26), 0.5, GREY)
+
         frame = s.reading.frame if (s.reading is not None and s.reading.frame is not None) else None
+        if not page_known:
+            img[iy:iy + ih, ix:ix + iw] = self._page_search_view(frame, status, iw, ih)
+            return
         if frame is not None:
             page = cv2.resize(frame, (iw, ih), interpolation=cv2.INTER_AREA)
         else:
             page = np.full((ih, iw, 3), 235, np.uint8)
             put(page, "no camera frame", (14, 30), 0.6, (90, 90, 90))
+            err = getattr(tr, "camera_error", "") or _component_error(s, "tracker")
+            if err:
+                for i, ln in enumerate(wrap(err, iw - 28, 0.5, 1, max_lines=4)):
+                    put(page, ln, (14, 58 + i * 22), 0.5, (40, 40, 170))
         # answer boxes
         for b in s.layout.values():
             active = s.current_box is not None and b.id == s.current_box.id
@@ -238,12 +306,23 @@ class Hud:
             age = min(1.0, (now - t1) / TRAIL_S)
             c = (int(40 + 180 * age), int(60 + 160 * age), int(230 - 20 * age))
             cv2.line(page, (ax, ay), (bx, by), c, max(1, int(5 * (1 - age)) + 1), cv2.LINE_AA)
-        # pen
-        pen = s.inputs.pen if s.inputs else None
+        # pen (off the paper: pinned to the edge with an arrow pointing to where it is)
         if pen is not None:
+            side = off_page_side(pen.x, pen.y)
+            px, py = int(np.clip(pen.x, 0.02, 0.98) * iw), int(np.clip(pen.y, 0.02, 0.98) * ih)
             c = (0, 0, 230) if pen.confidence >= 0.5 else (0, 140, 255)
-            cv2.circle(page, (int(pen.x * iw), int(pen.y * ih)), 10, c, -1 if pen.confidence >= 0.5 else 2, cv2.LINE_AA)
-            cv2.circle(page, (int(pen.x * iw), int(pen.y * ih)), 12, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.circle(page, (px, py), 10, c, -1 if pen.confidence >= 0.5 else 2, cv2.LINE_AA)
+            cv2.circle(page, (px, py), 12, (255, 255, 255), 1, cv2.LINE_AA)
+            if side:
+                dx = -1 if "LEFT" in side else (1 if "RIGHT" in side else 0)
+                dy = -1 if "ABOVE" in side else (1 if "BELOW" in side else 0)
+                cv2.arrowedLine(page, (px - 40 * dx, py - 40 * dy), (px + 14 * dx, py + 14 * dy),
+                                (0, 0, 200), 4, cv2.LINE_AA, tipLength=0.4)
+                cv2.rectangle(page, (0, 0), (iw, 40), (30, 30, 150), -1)
+                put(page, f"PEN TIP OFF THE PAGE: {side}", (12, 28), 0.7, WHITE, 2)
+        if status is not None and status[0]:                  # page known, but re-checking where it is
+            cv2.rectangle(page, (0, ih - 30), (iw, ih), (40, 90, 140), -1)
+            put(page, f"checking the page position... {int(100 * status[1])}%", (10, ih - 9), 0.55, WHITE)
         img[iy:iy + ih, ix:ix + iw] = page
         if pen is None and s.inputs is not None:
             cv2.rectangle(img, (ix, iy + ih - 92), (ix + iw, iy + ih), (30, 30, 150), -1)
@@ -251,27 +330,76 @@ class Hud:
             put(img, f"but the IMU still says: {motion.value}", (ix + 12, iy + ih - 20),
                 0.75, AMBER if pitch else GREY, 2)
 
+    def _page_search_view(self, frame, status, iw: int, ih: int) -> np.ndarray:
+        """No page calibration yet: the raw camera view (aspect kept), the tracker's corner guess and
+        what to do. Boxes and the pen are NOT drawn here: without the page there are no page coordinates."""
+        out = np.full((ih, iw, 3), 40, np.uint8)
+        if frame is not None:
+            fh, fw = frame.shape[:2]
+            k = min(iw / fw, ih / fh)
+            nw, nh = int(fw * k), int(fh * k)
+            ox, oy = (iw - nw) // 2, (ih - nh) // 2
+            out[oy:oy + nh, ox:ox + nw] = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+            corners = status[2] if status is not None else None
+            if corners is not None:
+                pts = (np.asarray(corners, np.float32) * k + (ox, oy)).astype(np.int32)
+                cv2.polylines(out, [pts.reshape(-1, 1, 2)], True, (0, 165, 255), 3, cv2.LINE_AA)
+            # a nearly black / featureless view looks like "no camera feed": say what is wrong instead
+            small = cv2.resize(frame, (64, 64), interpolation=cv2.INTER_AREA)
+            if small.mean() < 30:
+                hint = "CAMERA IMAGE IS DARK: lens covered or facing the desk?"
+            elif small.std() < 8:
+                hint = "CAMERA SEES A BLANK BLUR: too close to a surface?"
+            else:
+                hint = ""
+            if hint:
+                cv2.rectangle(out, (0, ih // 2 - 46), (iw, ih // 2 + 40), (30, 30, 150), -1)
+                put(out, hint, (12, ih // 2 - 14), 0.55, WHITE, 2)
+                put(out, "Point the iPhone's back camera straight down at the sheet.", (12, ih // 2 + 16), 0.5, WHITE)
+        else:
+            put(out, "waiting for the first camera frame...", (14, 130), 0.6, GREY)
+            err = getattr(self.s.c.tracker, "camera_error", "")
+            for i, ln in enumerate(wrap(err, iw - 28, 0.5, 1, max_lines=5)):
+                put(out, ln, (14, 160 + i * 22), 0.5, (120, 120, 235))
+        progress = status[1] if status is not None else 0.0
+        cv2.rectangle(out, (0, 0), (iw, 92), (30, 60, 110), -1)
+        put(out, "LOOKING FOR THE PAGE", (12, 30), 0.8, WHITE, 2)
+        put(out, "whole sheet in view, hands out, hold still", (12, 58), 0.55, WHITE)
+        cv2.rectangle(out, (12, 70), (iw - 12, 82), (80, 80, 80), -1)
+        cv2.rectangle(out, (12, 70), (12 + int((iw - 24) * min(1.0, progress)), 82), (90, 200, 90), -1)
+        return out
+
     def _imu(self, img, now: float, motion: MotionState) -> None:
         s = self.s
         x, y, w, h = panel(img, R_IMU, "PEN PROBE - what the pen is doing", MOTION_COLOR[motion])
         # state badge
         cv2.rectangle(img, (x + 12, y + 40), (x + 250, y + 100), MOTION_COLOR[motion], -1)
         put(img, motion.value, (x + 24, y + 83), 1.25, (15, 15, 15), 3)
-        # tap flash
-        tap = next(((t, n) for t, n in reversed(self.taps) if now - t < TAP_FLASH_S), None)
-        tx = x + 270
-        if tap:
-            k = 1.0 - (now - tap[0]) / TAP_FLASH_S
-            cv2.rectangle(img, (tx, y + 40), (x + w - 12, y + 100), (int(40 + 50 * k), int(120 + 100 * k), int(220 * k + 20)), -1)
-            put(img, f"TAP x{tap[1]}", (tx + 14, y + 83), 1.15, (15, 15, 15), 3)
-            hint = {1: "repeat", 2: "next"}.get(tap[1], "")
-            put(img, hint, (tx + 14, y + 98), 0.5, (15, 15, 15), 1)
+        # taps: flash for TAP_FLASH_S, then keep showing the last one (bring-up: "did it see my tap?")
+        tx, tw = x + 270, w - 282
+        words = {1: ("SINGLE TAP", "read / repeat"), 2: ("DOUBLE TAP", "next question")}
+        lt = self.last_tap
+        if lt is not None and now - lt[0] < TAP_FLASH_S:
+            k = 1.0 - (now - lt[0]) / TAP_FLASH_S
+            cv2.rectangle(img, (tx, y + 40), (tx + tw, y + 100), (int(40 + 50 * k), int(120 + 100 * k), int(220 * k + 20)), -1)
+            big, small = words.get(lt[1], (f"TAP x{lt[1]}", ""))
+            put(img, big, (tx + 12, y + 72), 0.85, (15, 15, 15), 2)
+            put(img, small + ("  (keyboard)" if lt[2] else ""), (tx + 12, y + 93), 0.5, (15, 15, 15), 1)
         else:
-            cv2.rectangle(img, (tx, y + 40), (x + w - 12, y + 100), (52, 48, 46), 1)
-            put(img, "taps: 1 read / repeat", (tx + 10, y + 66), 0.52, DIM)
-            put(img, "2 next question", (tx + 10, y + 90), 0.52, DIM)
+            cv2.rectangle(img, (tx, y + 40), (tx + tw, y + 100), (52, 48, 46), 1)
+            if lt is None:
+                put(img, "no tap yet", (tx + 12, y + 66), 0.6, GREY)
+                put(img, "1 = read   2 = next", (tx + 12, y + 90), 0.5, DIM)
+            else:
+                big, small = words.get(lt[1], (f"TAP x{lt[1]}", ""))
+                put(img, f"last: {big}", (tx + 12, y + 66), 0.55, WHITE)
+                put(img, f"{now - lt[0]:.0f} s ago" + ("  (keyboard)" if lt[2] else f"  {small}"), (tx + 12, y + 90), 0.5, GREY)
+        counts = f"pen taps seen:  single {self.tap_counts.get(1, 0)}   double {self.tap_counts.get(2, 0)}"
+        if self.key_taps:
+            counts += f"   (keyboard {self.key_taps})"
+        put(img, counts, (x + 12, y + 124), 0.55, WHITE)
         # waveform: ax, ay, az-1 (g), auto-scaled
-        gx, gy, gw, gh = x + 12, y + 118, w - 24, 150
+        gx, gy, gw, gh = x + 12, y + 138, w - 24, 118
         cv2.rectangle(img, (gx, gy), (gx + gw, gy + gh), (26, 24, 23), -1)
         cv2.line(img, (gx, gy + gh // 2), (gx + gw, gy + gh // 2), (60, 56, 52), 1)
         samples = self._samples(200)
@@ -287,7 +415,20 @@ class Hud:
         else:
             put(img, "no IMU samples", (gx + 12, gy + 80), 0.6, DIM)
         put(img, f"+/-{scale_g:.2f} g   ax ay az", (gx + 6, gy + gh + 22), 0.5, GREY)
-        put(img, "the pen knows WHAT it is doing", (x + 12, y + h - 14), 0.55, MOTION_COLOR[motion], 1)
+        link, col = self._link_status()
+        put(img, link, (x + 12, y + h - 14), 0.55, col, 1)
+
+    def _link_status(self) -> Tuple[str, Tuple[int, int, int]]:
+        imu = self.s.c.imu
+        connected = getattr(imu, "connected", None)
+        if connected is None:
+            return "fake pen (scripted world)", DIM
+        if connected:
+            port = getattr(imu, "port_name", "") or "pen"
+            ok = self.link_rate >= 10
+            return f"{port} connected   {self.link_rate:.0f} lines/s", GREEN if ok else AMBER
+        err = getattr(imu, "last_error", "") or "connecting..."
+        return f"PEN NOT CONNECTED: {err}"[:60], RED
 
     def _samples(self, n: int):
         try:
@@ -300,7 +441,12 @@ class Hud:
         if gd is None or not gd.pen_visible and gd.speech is None:
             put(img, "no pen / no active box", (x + 14, y + 74), 0.8, DIM, 1)
             return
-        put(img, gd.speech or "-", (x + 14, y + 66), 0.95, WHITE, 2)
+        speech = gd.speech or "-"
+        if text_w(speech, 0.95, 2) <= w - 28:
+            put(img, speech, (x + 14, y + 66), 0.95, WHITE, 2)
+        else:                                                   # long cue (e.g. off the page): two smaller lines
+            for i, ln in enumerate(wrap(speech, w - 28, 0.62, 1, max_lines=2)):
+                put(img, ln, (x + 14, y + 52 + i * 22), 0.62, WHITE, 1)
         put(img, f"dx {gd.dx_cm:+.1f} cm   dy {gd.dy_cm:+.1f} cm   dist {gd.dist_cm:.1f} cm", (x + 14, y + 98), 0.62, GREY)
         put(img, f"cmd {gd.cmd.value if gd.cmd else '-'}", (x + 14, y + 128), 0.62, AMBER)
         col = {WriteStatus.INSIDE: GREEN, WriteStatus.OUTSIDE: RED, WriteStatus.UNKNOWN: DIM}[gd.write_status]
