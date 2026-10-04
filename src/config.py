@@ -18,7 +18,7 @@ class AppConfig:
     BAUD_RATE: int = 115200
 
     # Vision & Camera
-    CAMERA_INDEX: int = int(os.getenv("CAMERA_INDEX", "1"))
+    CAMERA_INDEX: int = int(os.getenv("CAMERA_INDEX", "0")) #use 1 for Mac
     FRAME_WIDTH: int = 1920
     FRAME_HEIGHT: int = 1080
 
