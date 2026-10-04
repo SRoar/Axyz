@@ -29,6 +29,15 @@ REAL = {
     "brain": ("src.state_machine", "StateMachine"),
     "auditor": ("src.audit", "GeminiAuditor"),
 }
+ALL = tuple(REAL)
+
+
+def parse_real(spec: str) -> List[str]:
+    """'imu,brain' -> ['imu','brain'];  'all' -> every real component."""
+    parts = [p.strip() for p in (spec or "").split(",") if p.strip()]
+    return list(ALL) if "all" in parts else parts
+
+
 # These need wall-clock time (hardware / network / audio). Everything else can run on SimClock.
 REALTIME_PARTS = {"imu", "tracker", "voice", "auditor"}
 

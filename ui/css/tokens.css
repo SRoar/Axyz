@@ -1,0 +1,191 @@
+/* Illumin UI - tokens.  See ../DESIGN.md for the reasoning.
+   Order: fonts, palette (Impeccable: OKLCH, tinted neutrals), type, space/radii/elevation,
+   then the transitions.dev motion tokens (verbatim) and the three overrides we make on them. */
+
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("../fonts/instrument-sans-latin-wght-normal.woff2") format("woff2");
+  font-weight: 400 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Newsreader";
+  src: url("../fonts/newsreader-latin-wght-normal.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Ink neutrals: every grey leans toward the pen-ink hue (255). No pure black, no pure grey. */
+  --ink-950: oklch(0.145 0.012 255);   /* the desk behind the page */
+  --ink-900: oklch(0.18 0.013 255);    /* app background */
+  --ink-850: oklch(0.21 0.014 255);    /* raised surface (dock, menus) */
+  --ink-800: oklch(0.25 0.015 255);    /* hover */
+  --ink-700: oklch(0.32 0.016 255);
+  --line: oklch(0.36 0.016 255 / 0.55);
+  --line-strong: oklch(0.52 0.02 255 / 0.75);
+  --text-1: oklch(0.965 0.006 255);
+  --text-2: oklch(0.80 0.014 255);
+  --text-3: oklch(0.67 0.016 255);     /* 5.0:1 on --ink-900 */
+
+  /* Functional color: one hue per thing the system knows. Never decorative. */
+  --pen: oklch(0.77 0.14 238);                 /* where the pen is (camera) */
+  --pen-soft: oklch(0.77 0.14 238 / 0.14);
+  --still: oklch(0.76 0.03 255);               /* what the pen is doing (IMU) */
+  --moving: oklch(0.84 0.14 82);
+  --writing: oklch(0.80 0.15 158);
+  --lifted: oklch(0.77 0.11 318);
+  --warn: oklch(0.72 0.18 24);
+  --warn-soft: oklch(0.72 0.18 24 / 0.16);
+  --good: var(--writing);
+  --voice: oklch(0.94 0.035 95);               /* the voice, as warm light */
+
+  /* The sheet (fallback / demo camera only; the real page comes from the camera) */
+  --paper: oklch(0.965 0.005 250);
+  --paper-ink: oklch(0.27 0.05 265);
+
+  /* Type: two voices. Instrument Sans for the interface; Newsreader for text the student hears. */
+  --font-ui: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-read: "Newsreader", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --fs-1: 0.875rem;                            /* 14: secondary */
+  --fs-2: 1rem;                                /* 16: body */
+  --fs-3: 1.25rem;                             /* 20: readable from 1 m */
+  --fs-4: 1.5625rem;                           /* 25 */
+  --fs-5: 1.9375rem;                           /* 31: the question */
+  --fs-6: clamp(2.25rem, 4.2vw, 4rem);         /* phase: readable from 2 m */
+
+  /* Space + concentric radii: outer radius = inner radius + padding (make-interfaces-feel-better). */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --r-1: 6px;
+  --r-2: 12px;                                 /* r-1 + sp-... 6 padding */
+  --r-3: 20px;                                 /* r-2 + 8 padding */
+
+  /* Elevation = layered transparent shadows, not borders. Borders only mark structure/state. */
+  --lift:
+    0 0 0 1px oklch(0 0 0 / 0.35),
+    0 1px 2px oklch(0 0 0 / 0.30),
+    0 8px 24px -8px oklch(0 0 0 / 0.55);
+  --image-outline: oklch(1 0 0 / 0.1);         /* pure white at 10% on dark (never a tinted neutral) */
+
+  /* Hit area: 44px on touch, never less than 40px on a dense desktop surface. */
+  --hit: 44px;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   transitions-dev - universal install block (Jakubantalik/transitions.dev), pasted once, verbatim.
+   Every t-* transition in app.css / motion.js reads from these semantic names.
+   --------------------------------------------------------------------------------------------- */
+:root {
+  /* Card resize */
+  --resize-dur: 300ms;
+  --resize-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Number pop-in */
+  --digit-dur: 500ms;
+  --digit-distance: 8px;
+  --digit-stagger: 70ms;
+  --digit-blur: 2px;
+  --digit-ease: cubic-bezier(0.34, 1.45, 0.64, 1);
+  --digit-dir-x: 0;
+  --digit-dir-y: 1;
+  /* Notification badge */
+  --badge-slide-dur: 260ms;
+  --badge-pop-dur: 500ms;
+  --badge-pop-close-dur: 180ms;
+  --badge-fade-dur: 400ms;
+  --badge-fade-close-dur: 180ms;
+  --badge-blur: 2px;
+  --badge-offset-x: -8.2px;
+  --badge-offset-y: 12.4px;
+  --badge-slide-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --badge-pop-ease: cubic-bezier(0.34, 1.36, 0.64, 1);
+  --badge-close-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  /* Text states swap */
+  --text-swap-dur: 200ms;
+  --text-swap-translate-y: 8px;
+  --text-swap-blur: 2px;
+  --text-swap-ease: ease-out;
+  /* Menu dropdown */
+  --dropdown-open-dur: 250ms;
+  --dropdown-close-dur: 150ms;
+  --dropdown-pre-scale: 0.97;
+  --dropdown-closing-scale: 0.99;
+  --dropdown-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Modal open / close */
+  --modal-open-dur: 250ms;
+  --modal-close-dur: 150ms;
+  --modal-scale: 0.96;
+  --modal-scale-close: 0.96;
+  --modal-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Panel reveal */
+  --panel-open-dur: 400ms;
+  --panel-close-dur: 350ms;
+  --panel-translate-y: 100px;
+  --panel-blur: 2px;
+  --panel-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Page side-by-side */
+  --page-slide-dur: 200ms;
+  --page-fade-dur: 200ms;
+  --page-slide-distance: 8px;
+  --page-blur: 3px;
+  --page-stagger: 0ms;
+  --page-exit-enabled: 1;
+  --page-slide-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --page-fade-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Icon swap */
+  --icon-swap-dur: 200ms;
+  --icon-swap-blur: 2px;
+  --icon-swap-start-scale: 0.25;
+  --icon-swap-ease: ease-in-out;
+  /* Success check */
+  --check-opacity-dur: 550ms;
+  --check-rotate-dur: 550ms;
+  --check-rotate-from: 80deg;
+  --check-bob-dur: 450ms;
+  --check-y-amount: 40px;
+  --check-blur-dur: 500ms;
+  --check-blur-from: 10px;
+  --check-path-dur: 550ms;
+  --check-path-delay: 80ms;
+  --check-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --check-ease-opacity: cubic-bezier(0.22, 1, 0.36, 1);
+  --check-ease-rotate: cubic-bezier(0.22, 1, 0.36, 1);
+  --check-ease-bob: cubic-bezier(0.34, 1.35, 0.64, 1);
+  --check-ease-path: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Avatar group hover */
+  --avatar-lift: -4px;
+  --avatar-dur: 320ms;
+  --avatar-scale: 1.05;
+  --avatar-falloff: 0.45;
+  --avatar-ease-in: cubic-bezier(0.22, 1, 0.36, 1);
+  --avatar-ease-out: cubic-bezier(0.34, 3.85, 0.64, 1);
+  /* Error state shake */
+  --shake-distance: 6px;
+  --shake-overshoot: 4px;
+  --shake-dur-a: 80ms;
+  --shake-dur-b: 60ms;
+  --shake-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --revert-hold: 3000ms;
+  --revert-dur: 280ms;
+}
+
+/* Our three deliberate overrides.
+   Impeccable flags bounce easing as an AI-slop tell; make-interfaces-feel-better wants spring
+   bounce = 0. These tokens overshoot in transitions.dev, so we flatten them to its own
+   exponential-out curve. Durations, distances and blur are untouched. */
+:root {
+  --digit-ease: var(--resize-ease);
+  --badge-pop-ease: var(--badge-slide-ease);
+  --check-ease-bob: var(--check-ease-out);
+}
+
+/* Toast: transitions.dev lists a toast ("rise from below with fade + cross-blur, slower in than
+   out") but does not publish its tokens in the install block. Derived from the panel tokens. */
+:root {
+  --toast-open-dur: 320ms;
+  --toast-close-dur: 180ms;
+  --toast-translate-y: 12px;
+  --toast-blur: var(--panel-blur);
+  --toast-ease: var(--panel-ease);
+}

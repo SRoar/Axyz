@@ -19,3 +19,7 @@ data/sessions/
 *.jpg
 *.jpeg
 *.png
+
+# Dev 4: HUD screenshots, recordings
+captures/
+*.mp4
