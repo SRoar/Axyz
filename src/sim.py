@@ -31,11 +31,11 @@ def check(log, final_phase) -> list:
     if final_phase != Phase.COMPLETE:
         errs.append(f"did not finish: ended in {final_phase.value}")
     for p in ("READING", "NAVIGATING", "WRITING", "AUDITING"):
-        if phases.count(p) < 2:
-            errs.append(f"phase {p} seen {phases.count(p)}x, expected >=2 (one per question)")
-    if haptics.count("LOCK") < 2:
+        if phases.count(p) < 3:
+            errs.append(f"phase {p} seen {phases.count(p)}x, expected >=3 (one per question)")
+    if haptics.count("LOCK") < 3:
         errs.append("expected a LOCK haptic for each question")
-    if haptics.count("COMPLETE") < 2:
+    if haptics.count("COMPLETE") < 3:
         errs.append("expected a COMPLETE haptic for each question")
     if "WARN" not in haptics:
         errs.append("expected a WARN haptic when the pen drifted out of the box while writing")

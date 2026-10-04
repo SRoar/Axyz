@@ -57,8 +57,8 @@ def main():
     last_spoken_nav_time = 0.0
 
     print("\n--- Illumin Voice Navigation Ready ---")
-    print("Speak naturally: 'Find signature', 'Where do I sign', 'Find date'")
-    print("Or press keyboard shortcuts: [s] = Signature | [d] = Date | [c] = Clear | [q] = Quit\n")
+    # print("Speak naturally: 'Find signature', 'Where do I sign', 'Find date'")
+    print("Press keyboard shortcuts: [s] = Signature | [d] = Date | [c] = Clear | [q] = Quit\n")
 
     while tracker.is_opened():
         ret, frame, depth_map = tracker.read_frame()
@@ -67,18 +67,17 @@ def main():
 
         h, w = frame.shape[:2]
 
-        # 1. Listen for voice commands
-        spoken_cmd = voice.poll_command()
+        # 1. Listen for voice commands (disabled: pen taps drive the flow now)
         query = None
-
-        if spoken_cmd:
-            if any(k in spoken_cmd for k in ["signature", "sign"]):
-                query = "signature line"
-            elif any(k in spoken_cmd for k in ["date", "day"]):
-                query = "date field"
-            elif "clear" in spoken_cmd:
-                target_norm, target_box = None, None
-                voice.speak("Target cleared.")
+        # spoken_cmd = voice.poll_command()
+        # if spoken_cmd:
+        #     if any(k in spoken_cmd for k in ["signature", "sign"]):
+        #         query = "signature line"
+        #     elif any(k in spoken_cmd for k in ["date", "day"]):
+        #         query = "date field"
+        #     elif "clear" in spoken_cmd:
+        #         target_norm, target_box = None, None
+        #         voice.speak("Target cleared.")
 
         # Keyboard fallback overrides
         key = cv2.waitKey(1) & 0xFF

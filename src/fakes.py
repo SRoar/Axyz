@@ -33,23 +33,36 @@ P0 = (0.50, 0.10)
 # (t_start, t_end, motion, pen_from, pen_to, jitter)  -- script time in seconds.
 # Two questions. q1 includes a deliberate drift OUT of the box (t=11.67..12.33) to test WARN,
 # and a short pen occlusion (OCCLUSIONS). q2 ends with a TRIPLE tap instead of idling.
+# (t_start, t_end, motion, pen_from, pen_to, jitter) -- script time in seconds.
+# Three questions. q1 includes drift OUT of box. q2 and q3 complete with taps/idle.
 SEGMENTS: List[Tuple[float, float, MotionState, Tuple[float, float], Tuple[float, float], float]] = [
+    # Q1: IDLE -> MOVING -> STILL in box1 -> WRITING (with drift) -> IDLE
     (0.0, 5.0, S, P0, P0, 0.0),
-    (5.0, 8.0, M, P0, (0.50, 0.35), 0.0),
-    (8.0, 9.0, S, (0.50, 0.35), (0.50, 0.35), 0.0),
-    (9.0, 11.0, W, (0.50, 0.35), (0.80, 0.35), 0.006),
-    (11.0, 12.0, W, (0.80, 0.35), (0.80, 0.20), 0.006),   # leaves box at y<0.25
-    (12.0, 12.8, W, (0.80, 0.20), (0.70, 0.35), 0.006),   # re-enters
-    (12.8, 16.0, W, (0.70, 0.35), (0.20, 0.38), 0.006),
-    (16.0, 23.5, S, (0.20, 0.38), (0.20, 0.38), 0.0),     # answer 1 done: idle
-    (23.5, 24.0, L, (0.20, 0.38), (0.20, 0.38), 0.0),
-    (24.0, 27.0, M, (0.20, 0.38), (0.50, 0.65), 0.0),
-    (27.0, 28.0, S, (0.50, 0.65), (0.50, 0.65), 0.0),
-    (28.0, 33.0, W, (0.50, 0.65), (0.30, 0.70), 0.006),
-    (33.0, 1e9, S, (0.30, 0.70), (0.30, 0.70), 0.0),
+    (5.0, 8.0, M, P0, (0.50, 0.20), 0.0),
+    (8.0, 9.0, S, (0.50, 0.20), (0.50, 0.20), 0.0),
+    (9.0, 11.0, W, (0.50, 0.20), (0.80, 0.20), 0.006),
+    (11.0, 12.0, W, (0.80, 0.20), (0.80, 0.05), 0.006),   # leaves box1 (ymin 0.10)
+    (12.0, 12.8, W, (0.80, 0.05), (0.70, 0.20), 0.006),   # re-enters
+    (12.8, 16.0, W, (0.70, 0.20), (0.20, 0.25), 0.006),
+    (16.0, 23.5, S, (0.20, 0.25), (0.20, 0.25), 0.0),     # Answer 1 done (idle timeout)
+    # Transition to Q2
+    (23.5, 24.0, L, (0.20, 0.25), (0.20, 0.25), 0.0),
+    (24.0, 27.0, M, (0.20, 0.25), (0.50, 0.50), 0.0),     # move to box2
+    (27.0, 28.0, S, (0.50, 0.50), (0.50, 0.50), 0.0),
+    (28.0, 33.0, W, (0.50, 0.50), (0.30, 0.55), 0.006),
+    (33.0, 38.0, S, (0.30, 0.55), (0.30, 0.55), 0.0),     # Q2 done via TRIPLE tap at 33.3s
+    # Transition to Q3
+    (38.0, 39.0, L, (0.30, 0.55), (0.30, 0.55), 0.0),
+    (39.0, 42.0, M, (0.30, 0.55), (0.50, 0.75), 0.0),     # move to box3
+    (42.0, 43.0, S, (0.50, 0.75), (0.50, 0.75), 0.0),     # lock in box3
+    (43.0, 48.0, W, (0.50, 0.75), (0.40, 0.80), 0.006),   # writing q3
+    (48.0, 1e9, S, (0.40, 0.80), (0.40, 0.80), 0.0),      # Q3 done via TRIPLE tap at 48.3s
 ]
-OCCLUSIONS = [(6.0, 6.3)]                 # tracker returns None
-TAPS = [(33.3, Tap.TRIPLE)]               # student taps three times: "done"
+OCCLUSIONS = [(6.0, 6.3)]
+TAPS = [
+    (33.3, Tap.TRIPLE),  # completes Q2
+    (48.3, Tap.TRIPLE),  # completes Q3
+]
 
 
 class FakeWorld:
@@ -131,7 +144,7 @@ class FakeImuLink:
         self.rng = random.Random(seed)
         self.motion: MotionState = S
         self._samples: Deque[ImuSample] = deque(maxlen=1000)
-        self._next_sample = 0.0
+        self._next_sample: Optional[float] = None
         self._taps_done = 0
         self.haptic_log: List[Tuple[float, HapticCmd]] = []
 
@@ -148,6 +161,8 @@ class FakeImuLink:
         while self._taps_done < len(TAPS) and TAPS[self._taps_done][0] <= ts:
             events.append(ImuEvent(now, tap=TAPS[self._taps_done][1]))
             self._taps_done += 1
+        if self._next_sample is None:
+            self._next_sample = now   # RealClock is seconds since boot; don't backfill from 0
         while self._next_sample <= now:
             self._samples.append(self._sample(self._next_sample, self.motion))
             self._next_sample += 1.0 / self.SAMPLE_HZ
