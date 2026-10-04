@@ -8,6 +8,8 @@ import pytest
 from src.contracts import SimClock, Tracker
 from src.marker import MarkerDetector, build_mask, sample_hsv_range
 from src.page_calibration import PageCalibration, StablePageDetector, detect_page_corners, order_corners
+from src.guidance import page_side
+from src.hand_tip import TipDetector
 from src.tracker import FRESH_S, HOLD_S, Measurement, OneEuro, PenTracker, hold_or_extrapolate
 from src.webcam import Frame
 
@@ -25,6 +27,23 @@ def page_image(marker_uv=None, extra_blob_px=None):
         cv2.circle(img, (int(round(x)), int(round(y))), 7, (0, 200, 0), -1)
     if extra_blob_px is not None:
         cv2.circle(img, extra_blob_px, 7, (0, 200, 0), -1)
+    return img
+
+
+SKIN = (110, 150, 205)
+
+
+def hand_image(tip_px, entry_px=(640, H + 40), base=None):
+    """An arm reaching in from the bottom edge, narrowing to a pointed finger / pen tip at tip_px."""
+    img = page_image() if base is None else base.copy()
+    tip = np.float32(tip_px)
+    entry = np.float32(entry_px)
+    d = (tip - entry) / np.linalg.norm(tip - entry)
+    n = np.float32([-d[1], d[0]])
+    knuckle = tip - 70 * d
+    cv2.line(img, tuple(map(int, entry)), tuple(map(int, knuckle)), SKIN, 60)
+    tri = np.int32([knuckle + 18 * n, knuckle - 18 * n, tip])
+    cv2.fillConvexPoly(img, tri, SKIN)
     return img
 
 
@@ -70,8 +89,14 @@ def test_stable_page_detector_waits_for_a_still_page():
     assert det.update(img, 1.6) == 1.0 and np.abs(det.corners - CORNERS).max() < 4
     covered = img.copy()
     covered[:, :] = 40                                   # page gone (e.g. lifted away)
-    assert det.update(covered, 1.7) == 0.0 and det.corners is None
-    assert det.update(img, 1.8) == 0.0                   # countdown restarts
+    assert det.update(covered, 1.7) == 1.0               # a brief miss is ignored
+    assert det.update(covered, 2.3) == 0.0 and det.corners is None   # a long gap resets
+    assert det.update(img, 2.4) == 0.0                   # countdown restarts
+    wobble = page_image()
+    det2 = StablePageDetector(hold_s=1.0)
+    det2.update(wobble, 0.0)
+    shifted = np.roll(wobble, 3, axis=1)                 # 3 px wobble keeps counting
+    assert det2.update(shifted, 1.1) == 1.0
 
 
 # --------------------------------------------------------------------------- marker
@@ -112,6 +137,36 @@ def test_click_sampling_handles_red_hue_wrap():
     v = sample_hsv_range(hsv, 10, 10, radius=6)
     assert v["h_lo"] > v["h_hi"]                       # wraps around 0
     assert build_mask(hsv, v)[2:-2, 2:-2].all()
+
+
+# --------------------------------------------------------------------------- marker-free tip
+def test_tip_detector_finds_the_pointed_end():
+    det = TipDetector()
+    det.set_background(page_image())
+    for tip in [(620, 300), (500, 200), (850, 450), (250, 350)]:      # last one is off the page
+        d = det.detect(hand_image(tip))
+        assert d is not None, tip
+        assert abs(d.x - tip[0]) < 4 and abs(d.y - tip[1]) < 4, (tip, d)
+        assert d.entry[1] > H - 10                                      # arm enters at the bottom
+
+
+def test_tip_detector_initialises_background_on_first_frame():
+    det = TipDetector()
+    assert det.detect(page_image()) is None and det.has_background
+    assert det.detect(hand_image((640, 300))) is not None
+
+
+def test_tip_detector_ignores_shadows_exposure_and_loose_blobs():
+    bg = page_image()
+    det = TipDetector()
+    det.set_background(bg)
+    shadow = bg.copy()
+    shadow[400:, 500:800] = (shadow[400:, 500:800] * 0.7).astype(np.uint8)   # hand shadow from the edge
+    assert det.detect(shadow) is None
+    assert det.detect((bg * 0.8).astype(np.uint8)) is None                   # auto-exposure dip
+    ink = bg.copy()
+    cv2.circle(ink, (640, 360), 15, (30, 30, 30), -1)                         # not touching the border
+    assert det.detect(ink) is None
 
 
 # --------------------------------------------------------------------------- occlusion
@@ -182,7 +237,8 @@ def tracker(tmp_path):
     marker.write_text(json.dumps(GREEN))
     clock = SimClock(100.0)
     cam = ScriptedCamera()
-    tr = PenTracker(clock, calib_path=str(calib), marker_path=str(marker), camera=cam)
+    tr = PenTracker(clock, calib_path=str(calib), marker_path=str(marker), camera=cam,
+                    startup_calibrate=False, detect_mode="marker")
     tr.start()
     yield tr, cam, clock
     tr.stop()
@@ -252,5 +308,50 @@ def test_pen_tracker_calibrates_itself_when_no_file(tmp_path):
         _push_and_wait(tr, cam, img, clock.t)
         p = tr.read().pen
         assert p is not None and abs(p.x - 0.5) < 0.01 and abs(p.y - 0.5) < 0.01
+    finally:
+        tr.stop()
+
+
+def test_pen_tracker_tracks_fingertip_on_and_off_the_page(tmp_path):
+    calib_path = tmp_path / "calib.json"
+    calib = PageCalibration(CORNERS, (W, H))
+    calib.save(str(calib_path))
+    clock = SimClock(0.0)
+    cam = ScriptedCamera()
+    tr = PenTracker(clock, calib_path=str(calib_path), marker_path=str(tmp_path / "none.json"),
+                    camera=cam, startup_calibrate=False)          # no marker tuned -> tip mode
+    tr.start()
+    try:
+        clock.t = 1 / 30
+        _push_and_wait(tr, cam, page_image(), clock.t)            # empty scene = background
+        for target in [(0.40, 0.60), (-0.15, 0.50), (1.20, 0.40)]:
+            tip = calib.to_pixels(*target)
+            for _ in range(20):
+                clock.t += 1 / 30
+                _push_and_wait(tr, cam, hand_image(tip), clock.t)
+            p = tr.read().pen
+            assert p is not None and abs(p.x - target[0]) < 0.02 and abs(p.y - target[1]) < 0.02, (target, p)
+            assert tr.last_detection().source == "tip"
+            assert page_side(p.x, p.y) == {0.40: None, -0.15: "left", 1.20: "right"}[target[0]]
+    finally:
+        tr.stop()
+
+
+def test_pen_tracker_startup_search_relocks_and_learns_background(tmp_path):
+    calib_path = tmp_path / "calib.json"
+    PageCalibration(CORNERS + 25, (W, H)).save(str(calib_path))   # stale: page has moved since
+    clock = SimClock(0.0)
+    cam = ScriptedCamera()
+    tr = PenTracker(clock, calib_path=str(calib_path), marker_path=str(tmp_path / "none.json"), camera=cam)
+    tr.start()
+    try:
+        assert tr.calibration_status()[0]                          # searching at startup
+        for i in range(1, 75):
+            clock.t = i / 30
+            _push_and_wait(tr, cam, page_image(), clock.t)
+        assert not tr.calibration_status()[0]
+        assert np.abs(tr.calibration.corners_px - CORNERS).max() < 4
+        assert np.abs(PageCalibration.load(str(calib_path)).corners_px - CORNERS).max() < 4
+        assert tr.tip.has_background
     finally:
         tr.stop()

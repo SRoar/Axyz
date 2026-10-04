@@ -10,6 +10,9 @@ Hysteresis (the only state; reset whenever the active box changes):
   * GUIDE_LEFT/RIGHT vs GUIDE_BOTH: switches at DEADZONE_CM +/- AXIS_HYST_CM, so the buzzer
     doesn't flicker between sides when the pen is almost aligned horizontally.
 
+Off the page (x or y outside 0..1) the spoken cue starts with where the pen is:
+"You are off the page, to the left. Move 3 inches Right."
+
 dx_cm / dy_cm point from the pen to the target region (the box shrunk by TARGET_INSET_CM, which is
 deeper than ENTER_INSET_CM), so following the cue always ends with in_box = True.
 """
@@ -45,6 +48,24 @@ def phrase(dx_cm: float, dy_cm: float) -> str:
     if second[0] >= CM_PER_INCH * 0.75 and second[0] >= 0.4 * first[0]:
         text += f" and {_amount(second[0])} {second[1]}"
     return text + "."
+
+
+def page_side(x: float, y: float) -> Optional[str]:
+    """Where an off-page pen is relative to the page: 'left', 'right', 'above', 'below',
+    'above left', ... or None when the pen is on the page."""
+    v = "above" if y < 0 else ("below" if y > 1 else "")
+    h = "left" if x < 0 else ("right" if x > 1 else "")
+    side = f"{v} {h}".strip()
+    return side or None
+
+
+def off_page_phrase(side: str) -> str:
+    """'left' -> 'You are off the page, to the left.'  'above left' -> '..., above and to the left.'"""
+    parts = side.split()
+    v = next((p for p in parts if p in ("above", "below")), None)
+    h = next((p for p in parts if p in ("left", "right")), None)
+    where = " and ".join(([v] if v else []) + ([f"to the {h}"] if h else []))
+    return f"You are off the page, {where}."
 
 
 def _axis_delta(p: float, lo: float, hi: float) -> float:
@@ -117,7 +138,11 @@ class GuidanceEngine:
             cmd = HapticCmd.GUIDE_RIGHT if dx > 0 else HapticCmd.GUIDE_LEFT
         else:
             cmd = HapticCmd.GUIDE_BOTH
-        return Guidance(cmd, phrase(dx, dy), dx, dy, dist, False, WriteStatus.OUTSIDE, True)
+        speech = phrase(dx, dy)
+        side = page_side(pen.x, pen.y)
+        if side:
+            speech = f"{off_page_phrase(side)} {speech}"
+        return Guidance(cmd, speech, dx, dy, dist, False, WriteStatus.OUTSIDE, True)
 
     @staticmethod
     def _max_inset(x0: float, x1: float, y0: float, y1: float, want: float = float("inf")) -> float:

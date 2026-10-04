@@ -134,28 +134,35 @@ def detect_page_corners(frame: np.ndarray, min_area_frac: float = 0.08,
 
 class StablePageDetector:
     """Hands-free calibration: accepts the auto-detected page once its corners have stayed
-    within `tol_px` for `hold_s` seconds (a hand over a corner restarts the countdown)."""
+    within `tol_px` for `hold_s` seconds. Detected corners wobble a few pixels frame to frame
+    (phone stabilisation / focus), and single frames can miss: misses shorter than `max_gap_s`
+    are ignored; a longer gap (hand over a corner, page moved away) restarts the countdown."""
 
-    def __init__(self, hold_s: float = 1.5, tol_px: float = 4.0) -> None:
-        self.hold_s, self.tol_px = hold_s, tol_px
+    def __init__(self, hold_s: float = 1.5, tol_px: float = 10.0, max_gap_s: float = 0.5) -> None:
+        self.hold_s, self.tol_px, self.max_gap_s = hold_s, tol_px, max_gap_s
         self.reset()
 
     def reset(self) -> None:
         self._ref: Optional[np.ndarray] = None
         self._since = 0.0
+        self._last_seen = -1e9
         self.corners: Optional[np.ndarray] = None
+        self.progress = 0.0
 
     def update(self, frame: np.ndarray, t: float) -> float:
         """Feed one frame; returns progress 0..1 (1 = stable, `corners` is ready to use)."""
         found = detect_page_corners(frame)
         if found is None:
-            self.reset()
-            return 0.0
+            if t - self._last_seen > self.max_gap_s:
+                self.reset()
+            return self.progress
+        self._last_seen = t
         if self._ref is None or np.abs(found - self._ref).max() > self.tol_px:
             self._ref, self._since = found, t
         self.corners = 0.7 * self.corners + 0.3 * found if self.corners is not None and \
             np.abs(found - self.corners).max() <= self.tol_px else found
-        return min(1.0, (t - self._since) / self.hold_s) if self.hold_s > 0 else 1.0
+        self.progress = min(1.0, (t - self._since) / self.hold_s) if self.hold_s > 0 else 1.0
+        return self.progress
 
 
 # --------------------------------------------------------------------------- interactive UI

@@ -2,24 +2,33 @@
 PenTracker: overhead camera -> pen-tip PenState in PAGE-NORMALIZED coordinates.  Owner: Dev 2.
 Contract: src.tracker.PenTracker(clock) with start / stop / read / snapshot (see contracts.Tracker).
 
-    python -m src.tracker            # live view: delivered FPS, PenState, rectified page, guidance
+    python -m src.tracker            # ONE command: finds the page, then tracks the pen tip / fingertip
 
-One-time setup at the venue (each step writes a file the tracker loads on start):
-    python tools/camera_check.py --list            # find the Logitech by name
-    python tools/camera_check.py --bench --save    # settings that give the full frame rate -> data/camera.json
-    python tools/calibrate_page.py                 # 4 page corners                       -> data/page_calibration.json
-    python tools/tune_marker.py                    # pen marker colour                    -> data/marker_hsv.json
-    python -m src.prescan                          # answer boxes                         -> data/layout.json
+What happens on start (no keys, no clicks):
+  1. CALIBRATE: the tracker looks for the white page; once it has held still for 1.5 s the
+     4 corners lock (saved to data/page_calibration.json) and that view of the empty scene
+     becomes the background for tip detection. If the page can't be found within
+     STARTUP_CALIB_S, the saved calibration is used.
+  2. TRACK: the pen tip (or the fingertip, when pointing) is found without any colour tuning:
+     src.hand_tip.TipDetector = the point of the hand/pen silhouette farthest from where the
+     arm enters the view. If a pen marker colour was tuned (tools/tune_marker.py ->
+     data/marker_hsv.json) and the marker is visible, it is used instead (more precise).
+  3. OFF THE PAGE: positions outside 0..1 are reported as-is (left of the page: x < 0, ...);
+     guidance.page_side() names the side and the spoken cue says so.
+
+Optional tools: tools/camera_check.py (camera / FPS), tools/calibrate_page.py (calibration window),
+tools/tune_marker.py (marker colour), python -m src.prescan (answer boxes -> data/layout.json).
 
 Threads: the camera grab thread keeps only the newest frame; the tracker thread processes every
-new frame exactly once (marker -> homography -> One-Euro smoothing). read() never blocks: it
+new frame exactly once (detect -> homography -> One-Euro smoothing). read() never blocks: it
 returns the latest measurement, extrapolated for up to HOLD_S with decaying confidence while the
-marker is hidden (hand occlusion), then pen=None.
+pen is hidden, then pen=None.
 """
 from __future__ import annotations
 
 import argparse
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -30,15 +39,26 @@ import cv2
 import numpy as np
 
 from src.contracts import PAGE_H_CM, PAGE_W_CM, Clock, PenState, RealClock, TrackerReading
-from src.marker import MARKER_PATH, Detection, MarkerDetector, load_marker_params
+from src.hand_tip import TipDetector
+from src.marker import MARKER_PATH, MarkerDetector, load_marker_params
 from src.page_calibration import CALIB_PATH, PageCalibration, StablePageDetector
 from src.webcam import CameraConfig, Frame, load_camera_config, make_camera
 
 FRESH_S = 0.08          # a measurement younger than this is reported as-is
 HOLD_S = 0.30           # occlusion: hold/extrapolate this long, then pen=None
 EXTRAP_MAX_S = 0.15     # never extrapolate motion further than this
-ROI_MARGIN = 0.08       # search this far (page units) outside the calibrated page
-MAX_OFF_PAGE = 0.25     # detections further off the page than this are false positives
+ROI_MARGIN = 0.30       # marker search: this far (page units) outside the calibrated page
+MAX_OFF_PAGE = 1.0      # positions further off the page than this are nonsense (bad homography)
+STARTUP_CALIB_S = 8.0   # look for the page this long on start before falling back to the saved file
+
+
+@dataclass
+class TrackPoint:
+    x: float                                   # full-frame pixels
+    y: float
+    area: float
+    source: str                                # "marker" | "tip"
+    entry: Optional[Tuple[float, float]] = None   # tip mode: where the arm enters the view
 
 
 class OneEuro:
@@ -104,22 +124,29 @@ class PenTracker:
 
     def __init__(self, clock: Clock, camera_cfg: Optional[CameraConfig] = None,
                  calib_path: str = CALIB_PATH, marker_path: str = MARKER_PATH,
-                 hud_frame: bool = True, camera: Any = None, auto_calibrate: bool = True) -> None:
+                 hud_frame: bool = True, camera: Any = None, auto_calibrate: bool = True,
+                 startup_calibrate: bool = True, detect_mode: str = "auto") -> None:
+        """detect_mode: "auto" (marker if tuned + visible, else tip) | "marker" | "tip"."""
         self.clock = clock
         self.auto_calibrate = auto_calibrate
+        self.detect_mode = detect_mode
         self._page_auto = StablePageDetector(hold_s=1.5)
         self.camera_cfg = camera_cfg
         self.calib_path, self.marker_path = calib_path, marker_path
         self.hud_frame = hud_frame
         self.cam = camera
         self.detector = MarkerDetector(load_marker_params(marker_path))
+        self._marker_tuned = os.path.exists(marker_path)
+        self.tip = TipDetector()
         self._calib_file: Optional[PageCalibration] = PageCalibration.load(calib_path)
         self._calib: Optional[PageCalibration] = None
         self._calib_shape: Optional[Tuple[int, int]] = None
+        self._searching = auto_calibrate and (self._calib_file is None or startup_calibrate)
+        self._search_t0: Optional[float] = None
         self._fx, self._fy = OneEuro(), OneEuro()
         self._lock = threading.Lock()
         self._meas: Optional[Measurement] = None
-        self._last_det: Optional[Detection] = None
+        self._last_det: Optional[TrackPoint] = None
         self._frame: Optional[Frame] = None
         self._hud: Optional[np.ndarray] = None
         self._recent: Deque[Frame] = deque(maxlen=8)
@@ -136,11 +163,10 @@ class PenTracker:
         if self.cam is None:
             self.cam = make_camera(self.camera_cfg or load_camera_config(), time_fn=self.clock.now)
         self.cam.start()
-        if self._calib_file is None:
-            print(f"[tracker] no {self.calib_path}: "
-                  + ("calibrating automatically once the whole page is in view and still."
-                     if self.auto_calibrate else "reporting camera-normalized coords. "
-                     "Run `python tools/calibrate_page.py`."))
+        if self._searching:
+            print("[tracker] looking for the page: whole sheet in view, hands out, hold still...")
+        elif self._calib_file is None:
+            print(f"[tracker] no {self.calib_path}: reporting camera-normalized coords.")
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="pen-tracker", daemon=True)
         self._thread.start()
@@ -185,14 +211,29 @@ class PenTracker:
         self._calib, self._calib_shape = None, None
         self._page_auto.reset()
         self.detector = MarkerDetector(load_marker_params(self.marker_path))
+        self._marker_tuned = os.path.exists(self.marker_path)
         self._fx.reset()
         self._fy.reset()
+
+    def recalibrate(self) -> None:
+        """Hands-free re-calibration: look for the page again (hands out of view, hold still)."""
+        self._page_auto.reset()
+        self._search_t0 = None
+        self._searching = True
+
+    def reset_background(self) -> None:
+        """Re-learn the empty scene for tip detection from the next frame (hands out of view)."""
+        self.tip.reset()
+
+    def calibration_status(self) -> Tuple[bool, float, Optional[np.ndarray]]:
+        """(searching, progress 0..1, current page-corner guess in pixels) for the live view / HUD."""
+        return self._searching, self._page_auto.progress, self._page_auto.corners
 
     def raw_frame(self) -> Optional[np.ndarray]:
         with self._lock:
             return None if self._frame is None else self._frame.image
 
-    def last_detection(self) -> Optional[Detection]:
+    def last_detection(self) -> Optional[TrackPoint]:
         with self._lock:
             return self._last_det
 
@@ -217,6 +258,33 @@ class PenTracker:
             self.detector.set_roi(self._calib.page_polygon_px(ROI_MARGIN))
         return self._calib
 
+    def _search_page(self, img: np.ndarray, f: Frame) -> None:
+        if self._search_t0 is None:
+            self._search_t0 = f.t
+        if f.id % 3 == 0 and self._page_auto.update(img, f.t) >= 1.0:
+            h, w = img.shape[:2]
+            found = PageCalibration(self._page_auto.corners, (w, h))
+            found.save(self.calib_path)
+            self._calib_file, self._calib, self._calib_shape = found, None, None
+            self.tip.set_background(img)       # the page is fully visible: the scene is empty
+            self._searching = False
+            print(f"[tracker] page locked automatically -> {self.calib_path}; tracking the pen")
+        elif self._calib_file is not None and f.t - self._search_t0 > STARTUP_CALIB_S:
+            self._searching = False
+            print(f"[tracker] page not found in {STARTUP_CALIB_S:.0f}s: using the saved calibration")
+
+    def _detect(self, img: np.ndarray, prev: Optional[Measurement], t: float, w: int) -> Optional[TrackPoint]:
+        if self.detect_mode == "marker" or (self.detect_mode == "auto" and self._marker_tuned):
+            predict = (prev.px, prev.py) if prev is not None and t - prev.t <= HOLD_S else None
+            m = self.detector.detect(img, predict, gate_px=0.15 * w)
+            if m is not None:
+                return TrackPoint(m.x, m.y, m.area, "marker")
+        if self.detect_mode in ("auto", "tip"):
+            d = self.tip.detect(img)
+            if d is not None:
+                return TrackPoint(d.x, d.y, d.area, "tip", d.entry)
+        return None
+
     def _loop(self) -> None:
         last_id = 0
         while self._running:
@@ -233,17 +301,12 @@ class PenTracker:
         t0 = time.perf_counter()
         img = f.image
         h, w = img.shape[:2]
-        if self._calib_file is None and self.auto_calibrate and f.id % 10 == 0:
-            if self._page_auto.update(img, f.t) >= 1.0:
-                found = PageCalibration(self._page_auto.corners, (w, h))
-                found.save(self.calib_path)
-                self._calib_file, self._calib, self._calib_shape = found, None, None
-                print(f"[tracker] page found and calibrated automatically -> {self.calib_path}")
+        if self._searching:
+            self._search_page(img, f)
         calib = self._calibration_for(img.shape)
 
         prev = self._meas
-        predict = (prev.px, prev.py) if prev is not None and f.t - prev.t <= HOLD_S else None
-        det = self.detector.detect(img, predict, gate_px=0.15 * w)
+        det = self._detect(img, prev, f.t, w)
 
         meas = prev
         if det is not None:
@@ -258,7 +321,7 @@ class PenTracker:
                 xs = self._fx(u * PAGE_W_CM, f.t) / PAGE_W_CM
                 ys = self._fy(v * PAGE_H_CM, f.t) / PAGE_H_CM
                 meas = Measurement(f.t, xs, ys, self._fx.dx / PAGE_W_CM, self._fy.dx / PAGE_H_CM,
-                                   det.x, det.y, det.area, det.n_blobs)
+                                   det.x, det.y, det.area, 1)
             else:
                 det = None
 
@@ -287,13 +350,17 @@ def _sharpness(img: np.ndarray) -> float:
 # ---------------------------------------------------------------------- live view
 def main() -> int:
     from src.contracts import load_layout, sample_layout
-    from src.guidance import GuidanceEngine
+    from src.guidance import GuidanceEngine, page_side
     from src.page_calibration import click_corners
     from src.webcam import add_camera_args, config_from_args
 
-    ap = argparse.ArgumentParser(description="Live pen tracker view (Dev 2 standalone test)")
+    ap = argparse.ArgumentParser(description="Live pen tracker: finds the page, then tracks the pen tip / fingertip")
     add_camera_args(ap)
     ap.add_argument("--layout", default="data/layout.json")
+    ap.add_argument("--mode", default="auto", choices=["auto", "tip", "marker"],
+                    help="auto = marker if tuned and visible, else pen tip / fingertip (no tuning)")
+    ap.add_argument("--use-saved-calibration", action="store_true",
+                    help="skip the startup page search and use data/page_calibration.json")
     a = ap.parse_args()
 
     try:
@@ -302,14 +369,16 @@ def main() -> int:
         layout = sample_layout()
     box_ids = list(layout)
     clock = RealClock()
-    tracker = PenTracker(clock, config_from_args(a))
+    tracker = PenTracker(clock, config_from_args(a), detect_mode=a.mode,
+                         startup_calibrate=not a.use_saved_calibration)
     tracker.start()
     guide = GuidanceEngine()
     box = layout[box_ids[0]] if box_ids else None
     trail: Deque[Tuple[float, float, float]] = deque()
     last_print = 0.0
-    print("keys: c = recalibrate page (hands-free)   1-9 = guidance to box N   0 = no box   "
-          "s = save snapshot   r = reload calibration/marker   ESC = quit")
+    show_mask = False
+    print("keys: c = find the page again   b = re-learn empty background   m = click corners manually\n"
+          "      1-9 = guidance to box N   0 = no box   f = show foreground mask   s = snapshot   ESC = quit")
     try:
         while True:
             reading = tracker.read()
@@ -323,22 +392,38 @@ def main() -> int:
             st = tracker.stats()
             g = guide.compute(pen, box)
 
+            side = page_side(pen.x, pen.y) if pen is not None else None
             cam_view = raw.copy()
+            ch, cw = cam_view.shape[:2]
+            fs = max(0.45, cw / 1600.0)
             calib = tracker.calibration
-            if calib is not None:
+            searching, progress, guess = tracker.calibration_status()
+            if searching:
+                if guess is not None:
+                    cv2.polylines(cam_view, [np.int32(guess)], True, (0, 165, 255), 3)
+                cv2.rectangle(cam_view, (10, ch - 30), (10 + int(progress * (cw - 20)), ch - 18), (0, 255, 0), -1)
+                cv2.putText(cam_view, "FINDING THE PAGE - whole sheet in view, hands out, hold still",
+                            (10, ch - 40), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 165, 255), 2)
+            elif calib is not None:
                 cv2.polylines(cam_view, [np.int32(calib.page_polygon_px())], True, (0, 255, 0), 2)
-                cv2.polylines(cam_view, [np.int32(calib.page_polygon_px(ROI_MARGIN))], True, (0, 120, 0), 1)
             det = tracker.last_detection()
             if det is not None:
-                cv2.circle(cam_view, (int(det.x), int(det.y)), 12, (0, 0, 255), 2)
+                if det.entry is not None:
+                    cv2.line(cam_view, (int(det.entry[0]), int(det.entry[1])), (int(det.x), int(det.y)), (255, 120, 0), 1)
+                    cv2.circle(cam_view, (int(det.entry[0]), int(det.entry[1])), 8, (255, 120, 0), 2)
+                cv2.circle(cam_view, (int(det.x), int(det.y)), 10, (0, 0, 255), 2)
+                cv2.putText(cam_view, det.source, (int(det.x) + 12, int(det.y) - 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 255), 2)
             fps_col = (0, 255, 0) if st["camera_fps"] >= 25 else (0, 0, 255)
-            cv2.putText(cam_view, f"camera {st['camera_fps']:.1f} fps  tracker {st['tracker_fps']:.1f} fps  "
-                        f"{st['proc_ms']:.1f} ms/frame  detect {st['detect_rate'] * 100:.0f}%",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, fps_col, 2)
-            if calib is None:
-                cv2.putText(cam_view, "NOT CALIBRATED: show the whole page, hold still (or press c)", (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            cv2.putText(cam_view, f"camera {st['camera_fps']:.0f} fps  tracker {st['tracker_fps']:.0f} fps  "
+                        f"{st['proc_ms']:.1f} ms  detect {st['detect_rate'] * 100:.0f}%",
+                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX, fs, fps_col, 2)
+            if side:
+                cv2.putText(cam_view, f"OFF PAGE: {side.upper()}", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, fs * 1.6, (0, 0, 255), 3)
             cv2.imshow("tracker: camera", cam_view)
+            if show_mask and tracker.tip.mask is not None:
+                cv2.imshow("tracker: foreground", tracker.tip.mask)
 
             page = reading.frame.copy() if reading.frame is not None else np.full((559, 432, 3), 255, np.uint8)
             ph, pw = page.shape[:2]
@@ -355,7 +440,13 @@ def main() -> int:
                 cv2.line(page, (int(x0 * pw), int(y0 * ph)), (int(x1 * pw), int(y1 * ph)), (0, 200, 255), 2)
             if pen is not None:
                 col = (0, 0, 255) if pen.confidence >= 0.99 else (0, 165, 255)
-                cv2.circle(page, (int(pen.x * pw), int(pen.y * ph)), 6, col, -1)
+                px = int(min(pw - 6, max(5, pen.x * pw)))
+                py = int(min(ph - 6, max(5, pen.y * ph)))
+                if side:      # off the page: pin a ring to the nearest edge
+                    cv2.circle(page, (px, py), 9, (0, 0, 255), 2)
+                    cv2.putText(page, f"OFF PAGE: {side}", (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                else:
+                    cv2.circle(page, (px, py), 6, col, -1)
             lines = [
                 f"pen ({pen.x:.3f}, {pen.y:.3f}) = ({pen.x * PAGE_W_CM:.1f}, {pen.y * PAGE_H_CM:.1f}) cm  "
                 f"conf {pen.confidence:.2f}" if pen else "pen: NOT SEEN",
@@ -370,18 +461,32 @@ def main() -> int:
             if now - last_print >= 1.0:
                 last_print = now
                 warn = "  <-- below 25 FPS: run tools/camera_check.py --bench" if 0 < st["camera_fps"] < 25 else ""
-                print(f"cam {st['camera_fps']:5.1f} fps | trk {st['tracker_fps']:5.1f} fps | "
-                      f"{st['proc_ms']:4.1f} ms | {lines[0]} | {lines[2]} | {lines[3]}{warn}")
+                where = "SEARCHING FOR PAGE | " if searching else ""
+                src = f" [{det.source}]" if det is not None else ""
+                off = f" | OFF PAGE: {side}" if side else ""
+                print(f"{where}cam {st['camera_fps']:5.1f} fps | trk {st['tracker_fps']:5.1f} fps | "
+                      f"{st['proc_ms']:4.1f} ms | {lines[0]}{src}{off} | {lines[2]} | {lines[3]}{warn}")
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 break
             if key == ord("c"):
-                corners = click_corners(lambda: tracker.raw_frame(), auto_accept_s=1.5)
+                tracker.recalibrate()
+                print("looking for the page again: hands out of view, hold still")
+            elif key == ord("b"):
+                tracker.reset_background()
+                print("re-learning the empty background from the next frame")
+            elif key == ord("f"):
+                show_mask = not show_mask
+                if not show_mask:
+                    cv2.destroyWindow("tracker: foreground")
+            elif key == ord("m"):
+                corners = click_corners(lambda: tracker.raw_frame(), auto=False)
                 if corners is not None:
                     h, w = raw.shape[:2]
                     PageCalibration(corners, (w, h)).save(tracker.calib_path)
                     tracker.reload()
+                    tracker.reset_background()
                     print(f"saved {tracker.calib_path}")
             elif key == ord("r"):
                 tracker.reload()

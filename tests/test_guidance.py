@@ -138,3 +138,14 @@ def test_sim_drift_out_of_box_is_outside():
 ])
 def test_phrase(dx, dy, expected):
     assert phrase(dx, dy) == expected
+
+
+def test_off_page_side_and_speech():
+    from src.guidance import off_page_phrase, page_side
+    assert page_side(0.5, 0.5) is None and page_side(0.0, 1.0) is None
+    assert page_side(-0.1, 0.5) == "left" and page_side(1.2, 0.5) == "right"
+    assert page_side(0.5, -0.1) == "above" and page_side(-0.1, 1.3) == "below left"
+    assert off_page_phrase("left") == "You are off the page, to the left."
+    assert off_page_phrase("above right") == "You are off the page, above and to the right."
+    r = GuidanceEngine().compute(pen(-0.15, 0.35), BOX)
+    assert r.speech.startswith("You are off the page, to the left. Move") and "Right" in r.speech
