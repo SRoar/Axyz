@@ -49,7 +49,8 @@ HOLD_S = 0.30           # occlusion: hold/extrapolate this long, then pen=None
 EXTRAP_MAX_S = 0.15     # never extrapolate motion further than this
 ROI_MARGIN = 0.30       # marker search: this far (page units) outside the calibrated page
 MAX_OFF_PAGE = 1.0      # positions further off the page than this are nonsense (bad homography)
-STARTUP_CALIB_S = 8.0   # look for the page this long on start before falling back to the saved file
+STARTUP_CALIB_S = 15.0  # look for the page this long on start before falling back to the saved file
+SEARCH_DEBUG_PATH = "data/page_search_failed.png"
 
 
 @dataclass
@@ -266,12 +267,18 @@ class PenTracker:
             found = PageCalibration(self._page_auto.corners, (w, h))
             found.save(self.calib_path)
             self._calib_file, self._calib, self._calib_shape = found, None, None
-            self.tip.set_background(img)       # the page is fully visible: the scene is empty
+            if self._last_det is None or self._last_det.source != "tip":
+                self.tip.set_background(img)   # whole page visible and no hand: the scene is empty
             self._searching = False
             print(f"[tracker] page locked automatically -> {self.calib_path}; tracking the pen")
         elif self._calib_file is not None and f.t - self._search_t0 > STARTUP_CALIB_S:
             self._searching = False
-            print(f"[tracker] page not found in {STARTUP_CALIB_S:.0f}s: using the saved calibration")
+            try:
+                cv2.imwrite(SEARCH_DEBUG_PATH, img)
+            except cv2.error:
+                pass
+            print(f"[tracker] page not found in {STARTUP_CALIB_S:.0f}s: using the saved calibration "
+                  f"(view saved to {SEARCH_DEBUG_PATH}; press c to look again)")
 
     def _detect(self, img: np.ndarray, prev: Optional[Measurement], t: float, w: int) -> Optional[TrackPoint]:
         if self.detect_mode == "marker" or (self.detect_mode == "auto" and self._marker_tuned):
@@ -280,7 +287,7 @@ class PenTracker:
             if m is not None:
                 return TrackPoint(m.x, m.y, m.area, "marker")
         if self.detect_mode in ("auto", "tip"):
-            d = self.tip.detect(img)
+            d = self.tip.detect(img, t)
             if d is not None:
                 return TrackPoint(d.x, d.y, d.area, "tip", d.entry)
         return None

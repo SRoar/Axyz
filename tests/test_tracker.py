@@ -150,10 +150,26 @@ def test_tip_detector_finds_the_pointed_end():
         assert d.entry[1] > H - 10                                      # arm enters at the bottom
 
 
-def test_tip_detector_initialises_background_on_first_frame():
+def test_tip_detector_learns_background_only_once_the_view_is_still():
     det = TipDetector()
-    assert det.detect(page_image()) is None and det.has_background
-    assert det.detect(hand_image((640, 300))) is not None
+    for i in range(10):                                   # hand waving around: never learned
+        assert det.detect(hand_image((400 + 30 * i, 300)), i / 30) is None
+    assert not det.has_background
+    t = 10 / 30
+    while not det.has_background:                         # empty and still for ~0.7 s
+        det.detect(page_image(), t)
+        t += 1 / 30
+        assert t < 2.0
+    assert det.detect(hand_image((640, 300)), t) is not None
+
+
+def test_tip_detector_absorbs_a_blob_that_never_moves():
+    det = TipDetector()
+    det.set_background(hand_image((600, 250)))            # bad background: a hand was in it
+    ghost = page_image()                                  # hand gone -> ghost where it was
+    seen = [det.detect(ghost, i / 30) is not None for i in range(int(8 * 30))]
+    assert seen[0] and not seen[-1]                       # stuck at first, absorbed within ~6 s
+    assert det.detect(hand_image((500, 300)), 9.0) is not None   # a real hand still shows up
 
 
 def test_tip_detector_ignores_shadows_exposure_and_loose_blobs():
@@ -322,8 +338,10 @@ def test_pen_tracker_tracks_fingertip_on_and_off_the_page(tmp_path):
                     camera=cam, startup_calibrate=False)          # no marker tuned -> tip mode
     tr.start()
     try:
-        clock.t = 1 / 30
-        _push_and_wait(tr, cam, page_image(), clock.t)            # empty scene = background
+        for i in range(1, 31):                                    # 1 s of empty, still scene = background
+            clock.t = i / 30
+            _push_and_wait(tr, cam, page_image(), clock.t)
+        assert tr.tip.has_background
         for target in [(0.40, 0.60), (-0.15, 0.50), (1.20, 0.40)]:
             tip = calib.to_pixels(*target)
             for _ in range(20):

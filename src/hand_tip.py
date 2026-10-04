@@ -1,18 +1,21 @@
 """
 Marker-free pen-tip / fingertip detection.  Owner: Dev 2.
 
-Idea: the overhead camera sees a static scene (page + desk). When calibration locks, that scene
-is stored as the background. Anything that differs from it is foreground; the hand + pen always
-reach in from the edge of the camera view, so the foreground blob touches the frame border where
-the arm enters, and the POINTED END (pen tip, or the fingertip when pointing) is the blob pixel
-farthest from that entry point. Works anywhere in view, including off the page.
+Idea: the overhead camera sees a static scene (page + desk). That scene is stored as the
+background (when calibration locks, or after the view has been still for a moment). Anything
+that differs from it is foreground; the hand + pen always reach in from the edge of the camera
+view, so the foreground blob touches the frame border where the arm enters, and the POINTED END
+(pen tip, or the fingertip when pointing) is the blob pixel farthest from that entry point.
+Works anywhere in view, including off the page.
 
 Robustness:
   * global exposure changes (phone auto-exposure when the hand enters) -> background is rescaled
     by the frame/background brightness ratio before differencing
   * hand shadows on paper (darker, same colour) are not foreground
-  * blobs that don't touch the frame border (fresh ink, "ghosts" of objects that moved) are
-    absorbed into the background over a few seconds; the rest of the background adapts slowly
+  * blobs that don't touch the frame border (fresh ink, objects that moved) are absorbed into the
+    background within a few seconds; the rest of the background adapts slowly
+  * a border blob that doesn't move at all for STATIC_S (a "ghost" left by a bad background, a
+    bag strap, ...) is absorbed too, so the tip can't get stuck on it
 """
 from __future__ import annotations
 
@@ -21,6 +24,12 @@ from typing import Optional, Tuple
 
 import cv2
 import numpy as np
+
+STILL_S = 0.7          # view must be this still before the first background is learned
+STILL_DIFF = 4.0       # mean frame-to-frame change (0..255) that still counts as "still"
+STATIC_S = 6.0         # a blob whose tip + size don't change for this long is scenery
+STATIC_TIP_PX = 2.5    # (work-size pixels)
+STATIC_AREA = 0.05
 
 
 @dataclass
@@ -32,7 +41,7 @@ class TipDetection:
 
 
 class TipDetector:
-    def __init__(self, work_width: int = 480, diff_thresh: float = 40.0,
+    def __init__(self, work_width: int = 360, diff_thresh: float = 40.0,
                  min_area_frac: float = 0.004, adapt_rate: float = 0.03) -> None:
         self.work_width = work_width
         self.diff_thresh = diff_thresh
@@ -41,6 +50,10 @@ class TipDetector:
         self._bg: Optional[np.ndarray] = None       # float32, work size
         self._scale = 1.0
         self._gain = 1.0
+        self._n = 0
+        self._prev: Optional[np.ndarray] = None
+        self._still_since: Optional[float] = None
+        self._static: Optional[Tuple[float, float, float, float]] = None   # tip x, y, area, since
         self.mask: Optional[np.ndarray] = None      # last foreground mask (work size), for display
         self._k3 = np.ones((3, 3), np.uint8)
         self._k5 = np.ones((5, 5), np.uint8)
@@ -59,21 +72,35 @@ class TipDetector:
     def set_background(self, frame: np.ndarray) -> None:
         """Call with a view of the empty page (no hand). Calibration does this when it locks."""
         self._bg = self._small(frame).astype(np.float32)
+        self._static = None
 
     def reset(self) -> None:
+        """Forget the background; it is re-learned once the view is still (hands out)."""
         self._bg = None
+        self._prev, self._still_since, self._static = None, None, None
+
+    def _learn_when_still(self, small: np.ndarray, t: float) -> None:
+        prev, self._prev = self._prev, small
+        if prev is None or prev.shape != small.shape or cv2.norm(small, prev, cv2.NORM_L1) / small.size > STILL_DIFF:
+            self._still_since = t
+        elif self._still_since is not None and t - self._still_since >= STILL_S:
+            self._bg = small.astype(np.float32)
+            self._prev, self._still_since = None, None
 
     def foreground(self, small: np.ndarray) -> np.ndarray:
-        f = small.astype(np.float32)
-        bg = self._bg
-        gain = float(np.median(f.mean(axis=2))) / max(1.0, float(np.median(bg.mean(axis=2))))
-        self._gain = float(np.clip(gain, 0.6, 1.6))
-        bg = bg * self._gain
-        diff = np.abs(f - bg).max(axis=2)
-        ratio = f / (bg + 1.0)
-        rmax, rmin = ratio.max(axis=2), ratio.min(axis=2)
-        shadow = (rmax < 0.95) & (rmin > 0.40) & (rmax - rmin < 0.12)
-        fg = ((diff > self.diff_thresh) & ~shadow).astype(np.uint8) * 255
+        g_now = float(np.median(cv2.cvtColor(np.ascontiguousarray(small[::4, ::4]), cv2.COLOR_BGR2GRAY)))
+        g_bg = float(np.median(cv2.cvtColor(np.ascontiguousarray(self._bg[::4, ::4]), cv2.COLOR_BGR2GRAY)))
+        self._gain = float(np.clip(g_now / max(1.0, g_bg), 0.6, 1.6))
+        bg = cv2.convertScaleAbs(self._bg, alpha=self._gain)
+        c = cv2.split(cv2.absdiff(small, bg))
+        diff = cv2.max(cv2.max(c[0], c[1]), c[2])
+        fg = (diff > self.diff_thresh).view(np.uint8) * np.uint8(255)
+        ys, xs = np.nonzero(fg)
+        if len(ys):
+            ratio = small[ys, xs].astype(np.float32) / (bg[ys, xs].astype(np.float32) + 1.0)
+            rmax, rmin = ratio.max(axis=1), ratio.min(axis=1)
+            shadow = (rmax < 0.95) & (rmin > 0.40) & (rmax - rmin < 0.12)
+            fg[ys[shadow], xs[shadow]] = 0
         fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, self._k3)
         return cv2.morphologyEx(fg, cv2.MORPH_CLOSE, self._k5)
 
@@ -94,10 +121,11 @@ class TipDetector:
         if fx1 - fx0 < 3 or fy1 - fy0 < 3:
             return cx, cy
         bg = cv2.resize(self._bg[wy0:wy1, wx0:wx1], (fx1 - fx0, fy1 - fy0), interpolation=cv2.INTER_LINEAR)
-        roi = cv2.GaussianBlur(frame[fy0:fy1, fx0:fx1], (3, 3), 0).astype(np.float32)
-        fg = (np.abs(roi - bg * self._gain).max(axis=2) > self.diff_thresh).astype(np.uint8)
+        roi = cv2.GaussianBlur(frame[fy0:fy1, fx0:fx1], (3, 3), 0)
+        c = cv2.split(cv2.absdiff(roi, cv2.convertScaleAbs(bg, alpha=self._gain)))
+        fg = (cv2.max(cv2.max(c[0], c[1]), c[2]) > self.diff_thresh).view(np.uint8)
         fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, self._k3)
-        n, labels = cv2.connectedComponents(fg, connectivity=8)
+        _, labels = cv2.connectedComponents(fg, connectivity=8)
         k = labels[min(fy1 - fy0 - 1, max(0, int(cy) - fy0)), min(fx1 - fx0 - 1, max(0, int(cx) - fx0))]
         if k == 0:
             return cx, cy
@@ -108,10 +136,22 @@ class TipDetector:
         idx = np.argpartition(d2, -top)[-top:]
         return float(xs[idx].mean()), float(ys[idx].mean())
 
-    def detect(self, frame: np.ndarray) -> Optional[TipDetection]:
+    def _is_static(self, tx: float, ty: float, area: float, t: float) -> bool:
+        s = self._static
+        if s is None or np.hypot(tx - s[0], ty - s[1]) > STATIC_TIP_PX or abs(area - s[2]) > STATIC_AREA * s[2]:
+            self._static = (tx, ty, area, t)
+            return False
+        return t - s[3] >= STATIC_S
+
+    def detect(self, frame: np.ndarray, t: Optional[float] = None) -> Optional[TipDetection]:
+        """t: frame timestamp in seconds (defaults to a 30 fps frame count)."""
+        self._n += 1
+        t = self._n / 30.0 if t is None else t
         small = self._small(frame)
         if self._bg is None or self._bg.shape[:2] != small.shape[:2]:
-            self._bg = small.astype(np.float32)
+            self._bg = None
+            self.mask = None
+            self._learn_when_still(small, t)
             return None
         fg = self.foreground(small)
         self.mask = fg
@@ -129,7 +169,6 @@ class TipDetector:
         keep = np.zeros_like(fg)
         if best:
             blob = labels == best
-            keep[blob] = 255
             border = np.zeros_like(blob)
             border[0, :], border[-1, :], border[:, 0], border[:, -1] = blob[0, :], blob[-1, :], blob[:, 0], blob[:, -1]
             by, bx = np.nonzero(border)
@@ -139,13 +178,20 @@ class TipDetector:
             top = max(3, int(0.002 * len(xs)))
             idx = np.argpartition(d2, -top)[-top:]
             tx, ty = float(xs[idx].mean()), float(ys[idx].mean())
-            s = self._scale
-            entry = ((ex + 0.5) / s - 0.5, (ey + 0.5) / s - 0.5)
-            fx, fy = self._refine(frame, (tx + 0.5) / s - 0.5, (ty + 0.5) / s - 0.5, entry)
-            det = TipDetection(fx, fy, best_area / (s * s), entry)
+            if self._is_static(tx, ty, best_area, t):
+                self._bg[blob] = small[blob]          # it's scenery: absorb it
+                self._static = None
+            else:
+                keep[blob] = 255
+                s = self._scale
+                entry = ((ex + 0.5) / s - 0.5, (ey + 0.5) / s - 0.5)
+                fx, fy = self._refine(frame, (tx + 0.5) / s - 0.5, (ty + 0.5) / s - 0.5, entry)
+                det = TipDetection(fx, fy, best_area / (s * s), entry)
+        else:
+            self._static = None
 
         # adapt: everything except the hand blob (dilated) slowly joins the background, so ink,
         # moved objects and lighting drift disappear; the hand itself never does
         update = cv2.bitwise_not(cv2.dilate(keep, self._k5, iterations=2))
-        cv2.accumulateWeighted(small.astype(np.float32), self._bg, self.adapt_rate, mask=update)
+        cv2.accumulateWeighted(small, self._bg, self.adapt_rate, mask=update)
         return det
