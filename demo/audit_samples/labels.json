@@ -1,0 +1,38 @@
+[
+  {
+    "file": "1_ink_in_box.png",
+    "box_id": "box1",
+    "ink_present": true,
+    "ink_outside": false
+  },
+  {
+    "file": "2_ink_outside_only.png",
+    "box_id": "box1",
+    "ink_present": false,
+    "ink_outside": true
+  },
+  {
+    "file": "3_empty.png",
+    "box_id": "box1",
+    "ink_present": false,
+    "ink_outside": false
+  },
+  {
+    "file": "4_ink_in_and_out.png",
+    "box_id": "box1",
+    "ink_present": true,
+    "ink_outside": true
+  },
+  {
+    "file": "5_faint_pencil_in_box.png",
+    "box_id": "box1",
+    "ink_present": true,
+    "ink_outside": false
+  },
+  {
+    "file": "6_shadow_only_no_ink.png",
+    "box_id": "box1",
+    "ink_present": false,
+    "ink_outside": false
+  }
+]

@@ -1,137 +1,271 @@
-"""Central orchestrator with live HUD, Gemini grounding, and spoken navigation cues."""
+"""
+TactileReader / Illumin -- the one command that runs the whole system.   Owner: Dev 4.
 
+    python -m src.main                                  # HUD on ALL FAKES (scripted world, real time, ~35 s)
+    python -m src.main --real imu,brain,voice           # IMU-driven core (Dev 1 + Dev 3 pair)
+    python -m src.main --real tracker,guidance,auditor  # camera pair (Dev 2 + Dev 4)
+    python -m src.main --real all --debug-keys          # the full demo, keyboard rescue enabled
+
+    --debug-keys   keys 1-4 inject STILL/MOVING/WRITING/LIFTED, t = triple tap (done),
+                   r = single tap (repeat), n = double tap (skip), 0 = release the override.
+                   A dead sensor can't kill the demo.  (Works with or without a real IMU.)
+    --record F.mp4 screen-record the HUD (the backup video).      --headless  no window (CI / soak)
+    --fast         fakes only: simulated clock, no sleeping (instant run, deterministic)
+    q / ESC / close the window = quit.   s = save a HUD screenshot to captures/.
+
+This replaces the old main.py (it called an undefined draw_hud).  The only place components meet
+is System.step(); this file just owns the clock, the loop, the window and shutdown.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import signal
+import sys
 import time
+from typing import List, Optional
+
 import cv2
-import numpy as np
-from src.config import config
-from src.camera import VisionTracker
-from src.vision_agent import VisionAgent, TargetBoundingBox
-from src.mock_bridge import MockHapticBridge, Telemetry
-from src.voice import VoiceEngine
+
+from src.contracts import (
+    Clock, HapticCmd, ImuEvent, ImuSample, MotionState, Phase, RealClock, SimClock, Tap,
+    load_layout, load_questions, sample_layout, sample_questions,
+)
+from src.factory import REAL, build, needs_realtime, parse_real
+from src.system import System
+
+DT = 0.02                   # 50 Hz control loop
+DRAW_DT = 1.0 / 30.0        # HUD at 30 fps
+WINDOW = "Illumin - TactileReader"
+OWNER = {
+    "imu": "Dev 1 (src/arduino_link.py)", "tracker": "Dev 2 (src/tracker.py)",
+    "guidance": "Dev 2 (src/guidance.py)", "voice": "Dev 3 (src/voice.py)",
+    "brain": "Dev 3 (src/state_machine.py)", "auditor": "Dev 4 (src/audit.py)",
+}
 
 
-def describe_direction(dx_cm: float, dy_cm: float, dist_cm: float) -> str:
+# =========================================================================== debug key injector
+class DebugImu:
     """
-    Restricts directions strictly to: Up, Down, Left, Right.
-    Speaks the dominant (farthest) direction first.
-    
-    Coordinate convention (OpenCV origin at top-left):
-      dy > 0: target is further down the page -> "Down"
-      dy < 0: target is higher up the page   -> "Up"
-      dx > 0: target is to the right         -> "Right"
-      dx < 0: target is to the left          -> "Left"
+    Wraps ANY ImuLink (fake or real).  Keyboard overrides motion + injects taps, so a dead or
+    flaky accelerometer cannot kill the demo.  Satisfies the ImuLink protocol.
+
+    While an override is set the wrapped link's own motion edges are dropped (the brain would
+    otherwise see two contradicting sources); '0' releases it.  Taps from the real device and
+    haptic output pass straight through.
     """
-    DEADZONE_CM = 1.0  # Tolerance threshold for axis alignment
 
-    abs_x = abs(dx_cm)
-    abs_y = abs(dy_cm)
+    def __init__(self, inner, clock: Clock) -> None:
+        self.inner, self.clock = inner, clock
+        self.override: Optional[MotionState] = None
+        self._pending: List[ImuEvent] = []
 
-    # If both axes are within deadzone, target is reached
-    if abs_x < DEADZONE_CM and abs_y < DEADZONE_CM:
-        return "You are on the target."
+    # ---- ImuLink protocol
+    @property
+    def motion(self) -> MotionState:
+        return self.override if self.override is not None else self.inner.motion
 
-    # Compare which axis error is larger
-    if abs_y >= abs_x:
-        # Farthest direction is vertical
-        direction = "Down" if dy_cm > 0 else "Up"
-        dist_inches = max(1, int(round(abs_y / 2.54)))
-    else:
-        # Farthest direction is horizontal
-        direction = "Right" if dx_cm > 0 else "Left"
-        dist_inches = max(1, int(round(abs_x / 2.54)))
+    def start(self) -> None:
+        self.inner.start()
 
-    unit_str = "inch" if dist_inches == 1 else "inches"
-    return f"Move {dist_inches} {unit_str} {direction}."
+    def stop(self) -> None:
+        self.inner.stop()
+
+    def poll(self) -> List[ImuEvent]:
+        real = self.inner.poll()
+        if self.override is not None:
+            real = [e for e in real if e.motion is None]    # drop real motion edges, keep taps
+        out = real + self._pending
+        self._pending = []
+        return out
+
+    def send(self, cmd: HapticCmd) -> None:
+        self.inner.send(cmd)
+
+    def recent_samples(self, n: int = 200) -> List[ImuSample]:
+        return self.inner.recent_samples(n)
+
+    def __getattr__(self, name):          # anything else (haptic_log, ...) comes from the wrapped link
+        return getattr(self.inner, name)
+
+    # ---- keyboard
+    def inject_motion(self, m: MotionState) -> None:
+        if m != self.motion:
+            self._pending.append(ImuEvent(self.clock.now(), motion=m))
+        self.override = m
+
+    def inject_tap(self, tap: Tap) -> None:
+        self._pending.append(ImuEvent(self.clock.now(), tap=tap))
+
+    def release(self) -> None:
+        self.override = None
+
+    def handle_key(self, key: int) -> bool:
+        """Returns True if the key was a debug key."""
+        k = chr(key) if 0 <= key < 256 else ""
+        motions = {"1": MotionState.STILL, "2": MotionState.MOVING,
+                   "3": MotionState.WRITING, "4": MotionState.LIFTED}
+        if k in motions:
+            self.inject_motion(motions[k])
+        elif k == "t":
+            self.inject_tap(Tap.TRIPLE)
+        elif k == "r":
+            self.inject_tap(Tap.SINGLE)
+        elif k == "n":
+            self.inject_tap(Tap.DOUBLE)
+        elif k == "0":
+            self.release()
+        else:
+            return False
+        return True
 
 
-def main():
-    tracker = VisionTracker()
-    tracker.calibrate_desk_plane()
-    agent = VisionAgent()
-    bridge = MockHapticBridge()
-    voice = VoiceEngine()
+# =========================================================================== setup
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="TactileReader full system + HUD")
+    ap.add_argument("--real", default="", help="comma list: imu,tracker,guidance,voice,brain,auditor (or: all)")
+    ap.add_argument("--debug-keys", action="store_true", help="keyboard injection of motion states / taps")
+    ap.add_argument("--questions", default="data/questions.json")
+    ap.add_argument("--layout", default="data/layout.json")
+    ap.add_argument("--record", default=None, metavar="FILE.mp4", help="record the HUD to a video file")
+    ap.add_argument("--headless", action="store_true", help="no window; exit when the test completes")
+    ap.add_argument("--fast", action="store_true", help="fakes only: simulated clock, no sleeping")
+    ap.add_argument("--max-seconds", type=float, default=0.0, help="stop after N seconds (0 = no limit)")
+    ap.add_argument("--exit-on-complete", action="store_true", help="close the window ~4 s after COMPLETE")
+    return ap.parse_args(argv)
 
-    target_norm: tuple[float, float] | None = None
-    target_box: TargetBoundingBox | None = None
-    has_locked = False
-    last_spoken_nav_time = 0.0
 
-    print("\n--- Illumin Voice Navigation Ready ---")
-    print("Speak naturally: 'Find signature', 'Where do I sign', 'Find date'")
-    print("Or press keyboard shortcuts: [s] = Signature | [d] = Date | [c] = Clear | [q] = Quit\n")
+def load_data(qpath: str, lpath: str):
+    try:
+        return load_questions(qpath), load_layout(lpath)
+    except FileNotFoundError:
+        print(f"[main] {qpath} / {lpath} not found -> using the built-in sample questions + layout")
+        return sample_questions(), sample_layout()
 
-    while tracker.is_opened():
-        ret, frame, depth_map = tracker.read_frame()
-        if not ret or frame is None:
-            continue
 
-        h, w = frame.shape[:2]
+def make_system(args: argparse.Namespace):
+    """-> (system, clock, debug_imu_or_None).  Raises SystemExit with a human message on bad setup."""
+    real = parse_real(args.real)
+    unknown = set(real) - set(REAL)
+    if unknown:
+        raise SystemExit(f"unknown component(s) {sorted(unknown)}; choose from {sorted(REAL)} or 'all'")
+    realtime = needs_realtime(real)
+    if args.fast and realtime:
+        raise SystemExit("--fast only works with fakes (real hardware needs the wall clock)")
+    clock: Clock = SimClock() if args.fast else RealClock()
+    questions, layout = load_data(args.questions, args.layout)
+    try:
+        comps = build(real, clock, questions, layout, render=not args.headless or bool(args.record))
+    except ImportError as e:
+        missing = [n for n in real if REAL[n][0] == getattr(e, "name", None)]
+        who = ", ".join(OWNER[n] for n in missing) or "the owner of that module"
+        raise SystemExit(f"cannot import a real component: {e}\n -> is {who} merged into this branch yet?")
+    debug = None
+    if args.debug_keys:
+        debug = DebugImu(comps.imu, clock)
+        comps.imu = debug
+    return System(comps, clock, questions, layout), clock, debug
 
-        # 1. Listen for voice commands
-        spoken_cmd = voice.poll_command()
-        query = None
 
-        if spoken_cmd:
-            if any(k in spoken_cmd for k in ["signature", "sign"]):
-                query = "signature line"
-            elif any(k in spoken_cmd for k in ["date", "day"]):
-                query = "date field"
-            elif "clear" in spoken_cmd:
-                target_norm, target_box = None, None
-                voice.speak("Target cleared.")
+# =========================================================================== loop
+def run(args: argparse.Namespace) -> int:
+    from src.hud import H, W, Hud
 
-        # Keyboard fallback overrides
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        elif key == ord("c"):
-            target_norm, target_box = None, None
-            print("[Simulator] Target cleared.")
-        elif key in (ord("s"), ord("d")):
-            query = "signature line" if key == ord("s") else "date line"
+    system, clock, debug = make_system(args)
+    hud = Hud(system, debug)
+    show = not args.headless
+    realtime = not args.fast
+    writer = None
+    running = True
 
-        # 2. Localize Target with Gemini
-        if query:
-            voice.speak(f"Locating {query}.")
-            t_norm, box = agent.locate_target(frame, query)
-            if t_norm and box:
-                target_norm, target_box = t_norm, box
-                voice.speak(f"Target found. Place your hand on the page.")
-                last_spoken_nav_time = 0.0  # Force immediate cue once hand is seen
-                has_locked = False
+    def _stop(*_):
+        nonlocal running
+        running = False
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    if args.record:
+        writer = cv2.VideoWriter(args.record, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (W, H))
+        if not writer.isOpened():
+            print(f"[main] cannot open {args.record} for writing; recording disabled", file=sys.stderr)
+            writer = None
+    if show:
+        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW, 1280, 720)
+
+    print(f"[main] real={sorted(parse_real(args.real)) or 'none (all fakes)'}  debug_keys={args.debug_keys}  "
+          f"{'fast/sim clock' if args.fast else 'real time'}.  q / ESC to quit.")
+    system.start()
+    t_begin = clock.now()
+    next_loop = time.monotonic()
+    next_draw = clock.now()
+    complete_at: Optional[float] = None
+    hud_ok = True
+    try:
+        while running:
+            system.step()
+            hud.observe()
+            now = clock.now()
+
+            if now >= next_draw:
+                next_draw = now + DRAW_DT
+                if hud_ok and (show or writer):
+                    try:
+                        frame = hud.render()
+                        if writer is not None:
+                            writer.write(frame)
+                        if show:
+                            cv2.imshow(WINDOW, frame)
+                    except Exception as e:  # noqa: BLE001 -- a HUD bug must never stop the demo
+                        import traceback
+                        traceback.print_exc()
+                        print(f"[main] HUD disabled after error: {e}", file=sys.stderr)
+                        hud_ok = False
+                if show:
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (ord("q"), 27):
+                        break
+                    if debug is not None and key != 255:
+                        debug.handle_key(key)
+                    if key == ord("s") and hud_ok:
+                        os.makedirs("captures", exist_ok=True)
+                        p = f"captures/hud_{int(time.time())}.png"
+                        cv2.imwrite(p, hud.render())
+                        print(f"[main] saved {p}")
+                    if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                        break
+
+            if system.c.brain.phase == Phase.COMPLETE:
+                complete_at = complete_at if complete_at is not None else now
+                if (args.headless or args.exit_on_complete) and now - complete_at > (0.5 if args.headless else 4.0):
+                    break
+            if args.max_seconds and now - t_begin >= args.max_seconds:
+                break
+
+            if realtime:
+                next_loop += DT
+                lag = next_loop - time.monotonic()
+                if lag > 0:
+                    time.sleep(lag)
+                elif lag < -0.5:                  # fell far behind (debugger, slow HUD): don't spiral
+                    next_loop = time.monotonic()
             else:
-                voice.speak("I could not find that target on the document.")
+                clock.advance(DT)
+    finally:
+        system.stop()
+        if writer is not None:
+            writer.release()
+            print(f"[main] recording saved to {args.record}")
+        if show:
+            cv2.destroyAllWindows()
 
-        # 3. Track Pointer / Hand
-        hand_pose, elevation_cm, _ = tracker.estimate_hand_pose(frame, depth_map)
-        hand_px = (int(hand_pose[0] * w), int(hand_pose[1] * h)) if hand_pose else None
-        target_px = (int(target_norm[0] * w), int(target_norm[1] * h)) if target_norm else None
-        telemetry = None
+    print(f"[main] finished in phase {system.c.brain.phase.value}; component errors: {system.errors or 'none'}")
+    return 0 if not system.errors else 1
 
-        # 4. Spoken Direction Guidance Loop
-        if hand_pose and target_norm:
-            telemetry = bridge.compute_guidance(hand_pose, target_norm, elevation_cm)
 
-            if telemetry.is_locked:
-                if not has_locked:
-                    voice.speak("Target reached. You are directly on the line.")
-                    has_locked = True
-            else:
-                has_locked = False
-                now = time.time()
-                # Provide spoken updates every 3.5 seconds so speech doesn't overlap
-                if now - last_spoken_nav_time > 3.5:
-                    cue = describe_direction(telemetry.dx_cm, telemetry.dy_cm, telemetry.dist_cm)
-                    voice.speak(cue)
-                    last_spoken_nav_time = now
-
-        # 5. Draw HUD Visuals
-        draw_hud(frame, telemetry, target_px, hand_px, target_box)
-        cv2.imshow("Illumin Workspace Simulator", frame)
-
-    tracker.release()
-    cv2.destroyAllWindows()
+def main(argv: Optional[List[str]] = None) -> int:
+    return run(parse_args(argv))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

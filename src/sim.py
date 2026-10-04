@@ -14,7 +14,7 @@ import sys
 import time
 
 from src.contracts import Phase, RealClock, SimClock, load_layout, load_questions, sample_layout, sample_questions
-from src.factory import build, needs_realtime
+from src.factory import build, needs_realtime, parse_real
 from src.system import System
 
 DT = 0.02          # 50 Hz loop
@@ -42,6 +42,11 @@ def check(log, final_phase) -> list:
     if "GUIDE_BOTH" not in haptics and "GUIDE_RIGHT" not in haptics and "GUIDE_LEFT" not in haptics:
         errs.append("expected GUIDE_* haptics while moving toward the box")
 
+    # no component may have thrown (System swallows errors live; the sim must not)
+    for _, k, v in log:
+        if k == "ERROR":
+            errs.append(f"component error: {v}")
+
     # voice must be silent while the phase is WRITING
     phase = None
     for _, k, v in log:
@@ -61,12 +66,12 @@ def check(log, final_phase) -> list:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--real", default="", help="comma list: imu,tracker,guidance,voice,brain,auditor")
+    ap.add_argument("--real", default="", help="comma list: imu,tracker,guidance,voice,brain,auditor  (or: all)")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--questions", default="data/questions.json")
     ap.add_argument("--layout", default="data/layout.json")
     a = ap.parse_args()
-    real = [x for x in a.real.split(",") if x]
+    real = parse_real(a.real)
 
     try:
         questions, layout = load_questions(a.questions), load_layout(a.layout)
