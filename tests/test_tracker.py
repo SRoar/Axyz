@@ -423,3 +423,42 @@ def test_pen_tracker_startup_search_relocks_and_learns_background(tmp_path):
         assert tr.tip.has_background
     finally:
         tr.stop()
+
+
+def test_freeze_after_lock_ignores_page_movement_until_recalibrate(tmp_path):
+    """A physically fixed camera (taped down): once locked, corner-detector jitter alone must not
+    re-lock the page (it would otherwise look like the box positions / angle drifting). An explicit
+    recalibrate() must still pick up a genuine move."""
+    calib_path = tmp_path / "calib.json"
+    clock = SimClock(0.0)
+    cam = ScriptedCamera()
+    tr = PenTracker(clock, calib_path=str(calib_path), marker_path=str(tmp_path / "none.json"),
+                    camera=cam, freeze_after_lock=True)
+    tr.start()
+    try:
+        for i in range(1, 75):
+            clock.t = i / 30
+            _push_and_wait(tr, cam, page_image(), clock.t)
+        assert not tr.calibration_status()[0]                       # locked
+        assert np.abs(tr.calibration.corners_px - CORNERS).max() < 4
+        locked_t = clock.t
+
+        # The page "moves" (as if misdetected, or genuinely bumped) - frozen tracker must ignore it
+        moved = PageCalibration(CORNERS + 25, (W, H))
+        moved_img = np.full((H, W, 3), (40, 40, 40), np.uint8)
+        cv2.fillConvexPoly(moved_img, (CORNERS + 25).astype(np.int32), (235, 235, 235))
+        for i in range(1, 75):
+            clock.t = locked_t + i / 30
+            _push_and_wait(tr, cam, moved_img, clock.t)
+        assert np.abs(tr.calibration.corners_px - CORNERS).max() < 4, "frozen tracker re-locked anyway"
+
+        # An explicit recalibrate() must still follow a real move
+        tr.recalibrate()
+        assert tr.calibration_status()[0]                           # searching again
+        for i in range(1, 75):
+            clock.t = locked_t + 3 + i / 30
+            _push_and_wait(tr, cam, moved_img, clock.t)
+        assert not tr.calibration_status()[0]
+        assert np.abs(tr.calibration.corners_px - (CORNERS + 25)).max() < 4, "recalibrate() didn't pick up the move"
+    finally:
+        tr.stop()

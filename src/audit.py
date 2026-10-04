@@ -36,7 +36,7 @@ import numpy as np
 
 from src.contracts import PAGE_H_CM, PAGE_W_CM, AuditResult, Box, Clock, Question
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.8-flash"  # gemini-2.5-flash is retired for new API keys (404 NOT_FOUND)
 GEMINI_TIMEOUT_S = 6.0
 
 CROP_MARGIN = 0.10          # Gemini crop = box grown by 10 % of its size on every side

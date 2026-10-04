@@ -145,13 +145,19 @@ class PenTracker:
                  hud_frame: bool = True, camera: Any = None, auto_calibrate: bool = True,
                  startup_calibrate: bool = True, detect_mode: str = "auto",
                  profile_path: str = PROFILE_PATH, right_handed: bool = True,
-                 record_path: Optional[str] = None) -> None:
+                 record_path: Optional[str] = None, freeze_after_lock: bool = False) -> None:
         """detect_mode: "auto" (marker if tuned + visible, else tip) | "marker" | "tip".
         profile_path: our pen's colours (tools/capture_pen.py); without it a generic pen model is used.
-        record_path: write every raw tip detection to this CSV (t, x_cm, y_cm, source, px, py)."""
+        record_path: write every raw tip detection to this CSV (t, x_cm, y_cm, source, px, py).
+        freeze_after_lock: for a camera that's physically fixed (taped down, top-down): once the
+        initial scan locks, stop re-evaluating the page corners every frame. Corner-detector wobble
+        (a few px, autofocus/lighting) can otherwise exceed RELOCK_PX on its own and trigger a
+        spurious re-lock - which looks like the box positions / page angle drifting even though
+        nothing moved. Call recalibrate() to deliberately re-scan (e.g. the rig got bumped)."""
         self.clock = clock
         self.auto_calibrate = auto_calibrate
         self.detect_mode = detect_mode
+        self.freeze_after_lock = freeze_after_lock
         self._page_auto = StablePageDetector(hold_s=1.5)
         self.camera_cfg = camera_cfg
         self.calib_path, self.marker_path = calib_path, marker_path
@@ -326,7 +332,10 @@ class PenTracker:
 
     def _search_page(self, img: np.ndarray, f: Frame) -> None:
         """Startup: look for the page until it locks. Afterwards keep watching at a low rate and
-        re-lock if the page is seen, uncovered and still, somewhere else (page or camera moved)."""
+        re-lock if the page is seen, uncovered and still, somewhere else (page or camera moved).
+        With freeze_after_lock, skip all of that once locked - see recalibrate() to undo."""
+        if self.freeze_after_lock and not self._searching and self._calib_file is not None:
+            return
         if self._search_t0 is None:
             self._search_t0 = f.t
         if f.t < self._next_search_t:
@@ -370,9 +379,13 @@ class PenTracker:
             d = self.tip.detect(img, t, depth, confidence)
             if self.tip.scene_changed:
                 self.tip.scene_changed = False
-                if self.auto_calibrate and not self._searching:
+                if self.auto_calibrate and not self._searching and not self.freeze_after_lock:
                     print("[tracker] camera moved: finding the page again (keep the camera fixed)")
                     self.recalibrate()
+                elif self.freeze_after_lock:
+                    # page corners stay locked, but the hand/tip background reference is still
+                    # safe (and useful) to refresh - it doesn't touch page_calibration.json
+                    self.tip.reset()
             if d is not None:
                 return TrackPoint(d.x, d.y, d.area, d.source, d.entry)
         return None

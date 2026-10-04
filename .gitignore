@@ -20,6 +20,11 @@ data/sessions/
 *.jpeg
 *.png
 
+# Runtime page lock: regenerated each session, tied to wherever the camera is currently
+# pointed - committing it would just be a stale snapshot for anyone else
+data/page_calibration.json
+data/_stale_backup/
+
 # Dev 4: HUD screenshots, recordings
 captures/
 *.mp4

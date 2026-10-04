@@ -130,6 +130,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="TactileReader full system + HUD")
     ap.add_argument("--real", default="", help="comma list: imu,tracker,guidance,voice,brain,auditor (or: all)")
     ap.add_argument("--debug-keys", action="store_true", help="keyboard injection of motion states / taps")
+    ap.add_argument("--freeze-page", action="store_true",
+                    help="camera is physically fixed (taped down, top-down): lock the page/box "
+                         "positions after the initial scan instead of continuously re-evaluating "
+                         "them, which is sensitive to corner-detector jitter. With --debug-keys, "
+                         "'c' forces a fresh re-scan (e.g. the rig got bumped).")
     ap.add_argument("--questions", default=None,
                     help="default: data/questions.json with a real tracker, else the built-in sample questions")
     ap.add_argument("--layout", default=None,
@@ -179,6 +184,8 @@ def make_system(args: argparse.Namespace):
         missing = [n for n in real if REAL[n][0] == getattr(e, "name", None)]
         who = ", ".join(OWNER[n] for n in missing) or "the owner of that module"
         raise SystemExit(f"cannot import a real component: {e}\n -> is {who} merged into this branch yet?")
+    if args.freeze_page and hasattr(comps.tracker, "freeze_after_lock"):
+        comps.tracker.freeze_after_lock = True
     debug = None
     if args.debug_keys:
         debug = DebugImu(comps.imu, clock)
@@ -274,6 +281,9 @@ def run(args: argparse.Namespace) -> int:
                         p = f"captures/hud_{int(time.time())}.png"
                         cv2.imwrite(p, hud.render())
                         print(f"[main] saved {p}")
+                    if key == ord("c") and hasattr(system.c.tracker, "recalibrate"):
+                        system.c.tracker.recalibrate()
+                        print("[main] forcing a fresh page re-scan (hands out of view)")
                     if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                         break
 

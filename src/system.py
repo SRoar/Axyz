@@ -11,18 +11,23 @@ ERROR was logged, so bugs are still caught before merge -- they are just not fat
 """
 from __future__ import annotations
 
+import statistics
 import sys
 import traceback
+from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Callable, Deque, Dict, List, Optional, Tuple, TypeVar
 
 from src.contracts import (
     Auditor, AuditResult, Box, Clock, Guidance, GuidanceEngine, Haptic, ImuLink, Inputs,
-    MotionState, Phase, Question, SetBox, Silence, Snapshot, Speak, StateMachine, Tracker,
-    TrackerReading, Voice,
+    MotionState, Phase, PenState, Question, SetBox, Silence, Snapshot, Speak, StateMachine,
+    Tracker, TrackerReading, Voice,
 )
 
 T = TypeVar("T")
+
+TIP_SMOOTH_WINDOW_S = 0.2   # median over this much recent history before guidance sees it
+TIP_SMOOTH_MIN_POINTS = 3   # fewer than this: not enough to median, use the raw reading
 
 
 @dataclass
@@ -43,6 +48,8 @@ class System:
         self.question_order: List[str] = [q.id for q in questions]
         self.layout = layout
         self.current_box: Optional[Box] = None
+        self._tip_window: Deque[PenState] = deque()     # recent raw tip reads, for median smoothing
+        self._logged_waiting = False     # one-shot: logged once while waiting for the page to lock
         self.log: List[Tuple[float, str, str]] = []     # (t, kind, text) for HUD + sim asserts
         self.inputs: Optional[Inputs] = None            # last tick, for the HUD
         self.reading: Optional[TrackerReading] = None
@@ -81,11 +88,41 @@ class System:
                 self._log("ERROR", f"{self.last_error} (x{n})")
             return default
 
+    def _smoothed_pen(self, pen: Optional[PenState], now: float) -> Optional[PenState]:
+        """Median of recent tip reads over TIP_SMOOTH_WINDOW_S, so a single bad frame (wrong pen
+        end, a stray detection - tip detection is not perfectly accurate frame to frame) can't by
+        itself flip an inside/outside verdict or jerk a guidance cue. Falls straight through (no
+        smoothing, no stale carry-over) once the pen is lost, so "pen gone" is reported immediately."""
+        if pen is None:
+            self._tip_window.clear()
+            return None
+        self._tip_window.append(pen)
+        while self._tip_window and self._tip_window[0].t < now - TIP_SMOOTH_WINDOW_S:
+            self._tip_window.popleft()
+        if len(self._tip_window) < TIP_SMOOTH_MIN_POINTS:
+            return pen
+        mx = statistics.median(p.x for p in self._tip_window)
+        my = statistics.median(p.y for p in self._tip_window)
+        return PenState(t=pen.t, x=mx, y=my, lift_cm=pen.lift_cm, confidence=pen.confidence)
+
+    def _tracker_ready(self) -> bool:
+        """True once a real camera tracker has actually locked the page (boxes are now known in
+        pixel space). Always True for fakes/sim, which have no such concept (no calibration_status).
+        Gates the brain (and so voice/guidance/the rest of the algorithm) so nothing runs - no
+        question is read, no haptic fires - before the boxes are detected."""
+        status_fn = getattr(self.c.tracker, "calibration_status", None)
+        if status_fn is None:
+            return True
+        searching, _progress, _corners = self._safe(
+            "tracker.calibration_status", status_fn, (True, 0.0, None), comp="tracker")
+        return not searching and getattr(self.c.tracker, "calibration", None) is not None
+
     # ------------------------------------------------------------------ the tick
     def step(self) -> Inputs:
         c, now = self.c, self.clock.now()
         self.reading = self._safe("tracker.read", c.tracker.read, None, comp="tracker")
         pen = self.reading.pen if self.reading else None
+        pen = self._smoothed_pen(pen, now)
         events = self._safe("imu.poll", c.imu.poll, [], comp="imu") or []
         motion = self._safe("imu.motion", lambda: c.imu.motion, MotionState.STILL, comp="imu")
         guidance = self._safe("guidance.compute", lambda: c.guidance.compute(pen, self.current_box),
@@ -105,12 +142,17 @@ class System:
             self.last_audit = (now, audit)
             self._log("AUDIT", f"{audit.question_id}: ink={audit.ink_present} "
                                f"outside={audit.ink_outside} conf={audit.confidence:.2f} {audit.note}")
-        actions = self._safe("brain.update", lambda: c.brain.update(inp), [], comp="brain") or []
-        for a in actions:
-            self._execute(a)
-        if c.brain.phase != self._last_phase:
-            self._last_phase = c.brain.phase
-            self._log("PHASE", c.brain.phase.value)
+        if self._tracker_ready():
+            self._logged_waiting = False
+            actions = self._safe("brain.update", lambda: c.brain.update(inp), [], comp="brain") or []
+            for a in actions:
+                self._execute(a)
+            if c.brain.phase != self._last_phase:
+                self._last_phase = c.brain.phase
+                self._log("PHASE", c.brain.phase.value)
+        elif not self._logged_waiting:
+            self._logged_waiting = True
+            self._log("WAITING", "page not locked yet - holding before question 1 (voice, guidance idle)")
         self.inputs = inp
         return inp
 
