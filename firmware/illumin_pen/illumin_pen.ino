@@ -84,7 +84,7 @@ byte appendG(char *buf, byte pos, int8_t counts) {
   if (milli < 0) { buf[pos++] = '-'; milli = -milli; }
   pos = appendUInt(buf, pos, milli / 1000);
   buf[pos++] = '.';
-  byte frac = milli % 1000;
+  int frac = milli % 1000;  // up to 999: must not be a byte (max 255)
   buf[pos++] = '0' + (frac / 100);
   buf[pos++] = '0' + ((frac / 10) % 10);
   buf[pos++] = '0' + (frac % 10);
