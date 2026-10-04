@@ -67,20 +67,23 @@ def parse_s(line: str):
         return None
 
 
-def drain(ser, max_s: float = 15.0) -> None:
+def drain(ser, max_s: float = 120.0) -> None:
     """Throw away data buffered while nobody was reading, so recorded data is live.
 
-    The port can hold tens of thousands of old lines (seen: 5000 lines after ~4 min), so one
-    reset_input_buffer() is not enough; keep clearing until only a trickle is waiting.
+    The backlog is NOT only in the PC's port buffer: the board side keeps buffering too (seen: a
+    clip that held 14 minutes of old data, 27000 lines, and 5000 lines after ~4 min). So keep
+    reading until lines arrive at the live rate (~33 per second), not just until the PC buffer is empty.
     """
     t0 = time.time()
     while time.time() - t0 < max_s:
-        waiting = ser.in_waiting
-        if waiting < 256:
-            break
-        ser.read(waiting)
-    ser.reset_input_buffer()
-    ser.readline()  # discard the partial line at the cut
+        window_start = time.time()
+        lines = 0
+        while time.time() - window_start < 0.5:
+            if ser.readline():
+                lines += 1
+        if lines <= 24:  # live rate is ~16 lines per 0.5 s; a backlog delivers hundreds
+            return
+    print("  warning: could not catch up with the live stream; this clip may include old data")
 
 
 def record(ser, label: str, seconds: float, out_dir: str) -> str:
@@ -192,7 +195,14 @@ def main() -> None:
         if args.session:
             run_session(ser, args.seconds, args.out, args.countdown)
         else:
+            print(f"{args.label} for {args.seconds:.0f} s - {INSTRUCTIONS[args.label]}")
+            for _ in range(args.countdown):
+                beep(700, 150)
+                time.sleep(0.85)
+            beep(1200, 500)
             record(ser, args.label, args.seconds, args.out)
+            beep(500, 150)
+            beep(500, 150)
 
 
 if __name__ == "__main__":
