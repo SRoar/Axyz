@@ -369,6 +369,7 @@ def sample_questions() -> List[Question]:
 
 def sample_layout() -> Dict[str, Box]:
     return {
-        "box1": Box("box1", 0.10, 0.25, 0.90, 0.45),
-        "box2": Box("box2", 0.10, 0.55, 0.90, 0.80),
+        "box1": Box("box1", 0.10, 0.10, 0.90, 0.32),
+        "box2": Box("box2", 0.10, 0.38, 0.90, 0.60),
+        "box3": Box("box3", 0.10, 0.66, 0.90, 0.88),
     }

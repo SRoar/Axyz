@@ -1,16 +1,23 @@
 [
   {
     "id": "box1",
-    "xmin": 0.1,
-    "ymin": 0.25,
-    "xmax": 0.9,
-    "ymax": 0.45
+    "xmin": 0.10,
+    "ymin": 0.10,
+    "xmax": 0.90,
+    "ymax": 0.32
   },
   {
     "id": "box2",
-    "xmin": 0.1,
-    "ymin": 0.55,
-    "xmax": 0.9,
-    "ymax": 0.8
+    "xmin": 0.10,
+    "ymin": 0.38,
+    "xmax": 0.90,
+    "ymax": 0.60
+  },
+  {
+    "id": "box3",
+    "xmin": 0.10,
+    "ymin": 0.66,
+    "xmax": 0.90,
+    "ymax": 0.88
   }
 ]

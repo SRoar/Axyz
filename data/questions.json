@@ -8,5 +8,10 @@
     "id": "q2",
     "text": "Describe how the second law of thermodynamics relates to entropy.",
     "box_id": "box2"
+  },
+  {
+    "id": "q3",
+    "text": "State the formula for kinetic energy in terms of mass and velocity.",
+    "box_id": "box3"
   }
 ]
