@@ -7,6 +7,7 @@ Usage:
     python tools/camera_check.py --bench --save    # ...and save the best settings to data/camera.json
     python tools/camera_check.py --index 1 --width 1280 --height 720 --fps 30
     python tools/camera_check.py --scan            # show one frame from each index
+    python tools/camera_check.py --source record3d # iPhone via Record3D (USB streaming): preview + FPS
 
 Preview keys:
     [ / ]  manual exposure darker / brighter       a = back to auto exposure
@@ -39,7 +40,7 @@ import numpy as np  # noqa: E402
 
 from src.webcam import (  # noqa: E402
     CAMERA_CFG_PATH, CameraError, Webcam, add_camera_args, backend_id, config_from_args,
-    is_virtual, list_devices, resolve_device, save_camera_config,
+    is_virtual, list_devices, make_camera, resolve_device, save_camera_config,
 )
 
 BENCH_SIZES = [(1280, 720), (1920, 1080), (640, 480)]     # preference order
@@ -118,6 +119,10 @@ def _row(label, r):
 
 
 def bench(cfg, save):
+    if cfg.source != "webcam":
+        print(f"--bench tunes USB webcams; source is {cfg.source!r}. "
+              "Run `python tools/camera_check.py` to see its delivered FPS, or add --source webcam.")
+        return
     target = cfg.fps
     dshow = backend_id(cfg.backend) in (cv2.CAP_DSHOW, cv2.CAP_MSMF)
     print(f"Benchmarking {resolve_device(cfg, backend_id(cfg.backend))[1]} (target {target} fps). "
@@ -183,7 +188,8 @@ def bench(cfg, save):
 
 # --------------------------------------------------------------------------- preview
 def preview(cfg):
-    cam = Webcam(cfg)
+    cam = make_camera(cfg)
+    webcam = isinstance(cam, Webcam)
     try:
         cam.start()
     except CameraError as e:
@@ -229,6 +235,12 @@ def preview(cfg):
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 break
+            if not webcam:
+                if key == ord("s"):
+                    os.makedirs("data", exist_ok=True)
+                    cv2.imwrite("data/camera_check.png", f.image)
+                    print("saved data/camera_check.png")
+                continue
             if key in (ord("["), ord("]")):
                 exposure = (-6 if exposure is None else exposure) + (-1 if key == ord("[") else 1)
                 cam.set_exposure(exposure)

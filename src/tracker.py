@@ -194,7 +194,10 @@ class PenTracker:
     def stats(self) -> Dict[str, float]:
         with self._lock:
             s = list(self._proc_stamps)
-        proc_fps = (len(s) - 1) / (s[-1] - s[0]) if len(s) > 1 and s[-1] > s[0] else 0.0
+        now = time.perf_counter()
+        s = [x for x in s if now - x <= 2.0]
+        stale = not s or now - s[-1] > 0.5
+        proc_fps = 0.0 if stale or len(s) < 2 or s[-1] <= s[0] else (len(s) - 1) / (s[-1] - s[0])
         return {"camera_fps": self.cam.fps if self.cam is not None else 0.0, "tracker_fps": proc_fps,
                 "proc_ms": self._proc_ms, "detect_rate": self._detect_rate}
 

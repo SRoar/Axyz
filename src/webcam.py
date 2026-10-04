@@ -355,31 +355,78 @@ class Webcam(_FrameSource):
 
 
 class Record3DCamera(_FrameSource):
-    """iPhone/iPad over USB via the Record3D app (RGB only is used here)."""
+    """iPhone/iPad over USB via the Record3D app (RGB only; ~60 FPS at 720x960 portrait).
+
+    A watchdog reconnects whenever the stream stops or no frame arrives for STALL_S
+    (phone screen locked, app backgrounded, cable bumped)."""
+
+    STALL_S = 2.0
 
     def __init__(self, cfg: Optional[CameraConfig] = None,
                  time_fn: Callable[[], float] = time.monotonic, verbose: bool = True) -> None:
         super().__init__(time_fn)
         self.cfg = cfg or load_camera_config()
+        self.verbose = verbose
         self._stream = None
+        self._last_frame = 0.0
+        self._watchdog: Optional[threading.Thread] = None
 
     def start(self, first_frame_timeout: float = 6.0) -> "Record3DCamera":
         try:
-            from record3d import Record3DStream
+            import record3d  # noqa: F401
         except ImportError as e:
             raise CameraError("record3d is not installed (pip install record3d)") from e
+        self._running = True
+        if not self._connect():
+            self._running = False
+            raise CameraError("no Record3D device: plug in the iPhone (unlocked, 'Trust this computer'), "
+                              "open Record3D, enable USB Streaming in Settings and press the red button")
+        self._wait_first(first_frame_timeout, "Record3D")
+        self._watchdog = threading.Thread(target=self._watch, name="record3d-watchdog", daemon=True)
+        self._watchdog.start()
+        return self
+
+    def stop(self) -> None:
+        super().stop()
+        if self._watchdog is not None:
+            self._watchdog.join(timeout=2.0)
+            self._watchdog = None
+
+    def _on_frame(self) -> None:
+        stream = self._stream
+        if stream is None or not self._running:
+            return
+        self._last_frame = time.perf_counter()
+        self._publish(cv2.cvtColor(np.asarray(stream.get_rgb_frame()), cv2.COLOR_RGB2BGR))
+
+    def _connect(self) -> bool:
+        from record3d import Record3DStream
         devs = Record3DStream.get_connected_devices()
         if not devs:
-            raise CameraError("no Record3D device connected (open the Record3D app, USB streaming mode)")
-        self._stream = Record3DStream()
-        self._stream.on_new_frame = lambda: self._publish(
-            cv2.cvtColor(np.asarray(self._stream.get_rgb_frame()), cv2.COLOR_RGB2BGR))
-        self._stream.on_stream_stopped = lambda: print("[webcam] Record3D stream stopped")
-        self._running = True
-        self._stream.connect(devs[0])
-        self.info = {"device": "Record3D", "index": 0, "backend": "record3d"}
-        self._wait_first(first_frame_timeout, "Record3D")
-        return self
+            return False
+        stream = Record3DStream()
+        stream.on_new_frame = self._on_frame
+        stream.on_stream_stopped = lambda: print("[webcam] Record3D stream stopped; reconnecting...")
+        self._stream = stream
+        self._last_frame = time.perf_counter()
+        stream.connect(devs[0])
+        self.info = {"device": f"Record3D (product {devs[0].product_id})", "index": 0, "backend": "record3d"}
+        if self.verbose:
+            print(f"[webcam] connected to {self.info['device']}")
+        return True
+
+    def _watch(self) -> None:
+        while self._running:
+            time.sleep(0.25)
+            if time.perf_counter() - self._last_frame < self.STALL_S:
+                continue
+            self._stream = None
+            try:
+                if not self._connect():
+                    time.sleep(1.0)
+            except Exception as e:
+                print(f"[webcam] Record3D reconnect failed: {e!r}")
+                time.sleep(1.0)
 
 
 def make_camera(cfg: Optional[CameraConfig] = None, time_fn: Callable[[], float] = time.monotonic,
