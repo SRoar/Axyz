@@ -1,7 +1,63 @@
 import pytest
 
 from src.contracts import PAGE_H_CM, PAGE_W_CM, Box, GuidanceEngine as GuidanceProtocol, HapticCmd, PenState, WriteStatus
-from src.guidance import IN_BOX_SPEECH, GuidanceEngine, box_offset_cm, box_status, direction_words, phrase
+from src.guidance import (IN_BOX_SPEECH, GuidanceEngine, RecentTipJudge, box_offset_cm, box_status,
+                          direction_words, phrase)
+
+B1 = Box("box1", 0.5, 0.2, 0.9, 0.3)        # x 10.8-19.4 cm, y 5.6-8.4 cm
+B2 = Box("box2", 0.5, 0.4, 0.9, 0.5)
+
+
+def feed(judge, t0, pts, fps=60.0):
+    """pts: page-normalized (x, y) per frame. Returns the time of the last frame."""
+    t = t0
+    for i, (x, y) in enumerate(pts):
+        t = t0 + i / fps
+        judge.add(t, x, y)
+    return t
+
+
+def test_judge_in_box_despite_flicker_to_the_pen_back():
+    j = RecentTipJudge()
+    pts = [(0.7, 0.25)] * 60
+    for i in range(0, 60, 6):               # every 6th frame on the pen's back end, 4.5 cm up-right
+        pts[i] = (0.9 + 0.12, 0.25 - 0.1)
+    t = feed(j, 0.0, pts)
+    v = j.judge(t, [B1, B2], B1)
+    assert v.inside and v.box_id == "box1" and v.frac_in > 0.8
+    assert "IN box1" in v.text()
+
+
+def test_judge_direction_comes_from_the_median_point():
+    j = RecentTipJudge()
+    pts = [(0.3, 0.25)] * 50 + [(0.7, 0.25)] * 10      # mostly 4.3 cm left of box1
+    t = feed(j, 0.0, pts)
+    v = j.judge(t, [B1, B2], B1)
+    assert not v.inside
+    assert v.dx_cm == pytest.approx(0.2 * PAGE_W_CM, abs=0.01) and v.dy_cm == 0.0
+    assert "move right 4.3 cm" in v.text()
+
+
+def test_judge_without_target_follows_the_pen_to_another_box():
+    j = RecentTipJudge()
+    t = feed(j, 0.0, [(0.7, 0.25)] * 60)
+    assert j.judge(t, [B1, B2]).box_id == "box1"
+    t = feed(j, t + 1 / 60, [(0.7, 0.45)] * 50)      # moved to box2: 50 of the last 60 points
+    v = j.judge(t, [B1, B2])
+    assert v.box_id == "box2" and v.inside
+
+
+def test_judge_needs_enough_recent_points_and_has_hysteresis():
+    j = RecentTipJudge()
+    t = feed(j, 0.0, [(0.7, 0.25)] * 10)
+    assert j.judge(t, [B1], B1) is None                       # too few points
+    t = feed(j, t + 1 / 60, [(0.7, 0.25)] * 60)
+    assert j.judge(t, [B1], B1).inside
+    t = feed(j, t + 1 / 60, [(0.7, 0.33)] * 24)              # 40% of the window just below the box
+    assert j.judge(t, [B1], B1).inside                        # still IN (needs < 50% to leave)
+    t = feed(j, t + 1 / 60, [(0.7, 0.33)] * 30)
+    assert not j.judge(t, [B1], B1).inside
+    assert j.judge(t + 2.0, [B1], B1) is None                 # points older than the window are ignored
 
 
 def test_box_offset_and_direction_words():

@@ -59,6 +59,17 @@ RELOCK_PX = 8.0         # a page seen this far from the calibrated corners is re
 
 
 @dataclass
+class TipSample:
+    """One raw (unsmoothed) tip detection: every processed frame with a tip on/near the page."""
+    t: float
+    x: float            # page-normalized (camera-normalized while uncalibrated)
+    y: float
+    source: str         # "marker" | "pen" | "finger"
+    px: float           # full-frame pixels
+    py: float
+
+
+@dataclass
 class TrackPoint:
     x: float                                   # full-frame pixels
     y: float
@@ -132,9 +143,11 @@ class PenTracker:
                  calib_path: str = CALIB_PATH, marker_path: str = MARKER_PATH,
                  hud_frame: bool = True, camera: Any = None, auto_calibrate: bool = True,
                  startup_calibrate: bool = True, detect_mode: str = "auto",
-                 profile_path: str = PROFILE_PATH, right_handed: bool = True) -> None:
+                 profile_path: str = PROFILE_PATH, right_handed: bool = True,
+                 record_path: Optional[str] = None) -> None:
         """detect_mode: "auto" (marker if tuned + visible, else tip) | "marker" | "tip".
-        profile_path: our pen's colours (tools/capture_pen.py); without it a generic pen model is used."""
+        profile_path: our pen's colours (tools/capture_pen.py); without it a generic pen model is used.
+        record_path: write every raw tip detection to this CSV (t, x_cm, y_cm, source, px, py)."""
         self.clock = clock
         self.auto_calibrate = auto_calibrate
         self.detect_mode = detect_mode
@@ -166,6 +179,10 @@ class PenTracker:
         self._proc_ms = 0.0
         self._detect_rate = 0.0
         self._proc_stamps: Deque[float] = deque(maxlen=90)
+        self._samples: Deque[TipSample] = deque(maxlen=600)
+        self.record_path = record_path
+        self._rec: Any = None
+        self._rec_flush_t = 0.0
 
     # ------------------------------------------------------------------ contract
     def start(self) -> None:
@@ -178,6 +195,11 @@ class PenTracker:
             print("[tracker] looking for the page: whole sheet in view, hands out, hold still...")
         elif self._calib_file is None:
             print(f"[tracker] no {self.calib_path}: reporting camera-normalized coords.")
+        if self.record_path:
+            os.makedirs(os.path.dirname(self.record_path) or ".", exist_ok=True)
+            self._rec = open(self.record_path, "w", encoding="utf-8", newline="")
+            self._rec.write("t,x_cm,y_cm,source,px,py\n")
+            print(f"[tracker] recording every tip point to {self.record_path}")
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="pen-tracker", daemon=True)
         self._thread.start()
@@ -189,6 +211,9 @@ class PenTracker:
             self._thread = None
         if self.cam is not None:
             self.cam.stop()
+        if self._rec is not None:
+            self._rec.close()
+            self._rec = None
 
     def read(self) -> Optional[TrackerReading]:
         with self._lock:
@@ -248,6 +273,13 @@ class PenTracker:
     def last_detection(self) -> Optional[TrackPoint]:
         with self._lock:
             return self._last_det
+
+    def drain_samples(self) -> list:
+        """Every raw tip detection since the last call (oldest first), for sequence-level decisions."""
+        with self._lock:
+            out = list(self._samples)
+            self._samples.clear()
+        return out
 
     def stats(self) -> Dict[str, float]:
         with self._lock:
@@ -347,12 +379,14 @@ class PenTracker:
         det = self._detect(img, prev, f.t, w, getattr(f, "depth", None), getattr(f, "confidence", None))
 
         meas = prev
+        sample = None
         if det is not None:
             if calib is not None:
                 u, v = calib.to_page(det.x, det.y)
             else:
                 u, v = det.x / w, det.y / h
             if -MAX_OFF_PAGE <= u <= 1 + MAX_OFF_PAGE and -MAX_OFF_PAGE <= v <= 1 + MAX_OFF_PAGE:
+                sample = TipSample(f.t, float(u), float(v), det.source, float(det.x), float(det.y))
                 if prev is None or f.t - prev.t > HOLD_S:
                     self._fx.reset()
                     self._fy.reset()
@@ -374,6 +408,14 @@ class PenTracker:
             self._last_det = det
             self._hud = hud
             self._proc_stamps.append(time.perf_counter())
+            if sample is not None:
+                self._samples.append(sample)
+        if sample is not None and self._rec is not None:
+            self._rec.write(f"{sample.t:.4f},{sample.x * PAGE_W_CM:.2f},{sample.y * PAGE_H_CM:.2f},"
+                            f"{sample.source},{sample.px:.1f},{sample.py:.1f}\n")
+            if f.t - self._rec_flush_t >= 1.0:
+                self._rec.flush()
+                self._rec_flush_t = f.t
         dt_ms = (time.perf_counter() - t0) * 1000.0
         self._proc_ms = 0.9 * self._proc_ms + 0.1 * dt_ms if self._proc_ms else dt_ms
         self._detect_rate = 0.95 * self._detect_rate + 0.05 * (1.0 if det is not None else 0.0)
@@ -388,7 +430,7 @@ def _sharpness(img: np.ndarray) -> float:
 # ---------------------------------------------------------------------- live view
 def main() -> int:
     from src.contracts import load_layout, sample_layout
-    from src.guidance import GuidanceEngine, box_offset_cm, box_status, page_side
+    from src.guidance import RecentTipJudge, box_offset_cm, box_status, page_side
     from src.page_calibration import click_corners
     from src.webcam import add_camera_args, config_from_args
 
@@ -400,6 +442,8 @@ def main() -> int:
     ap.add_argument("--use-saved-calibration", action="store_true",
                     help="skip the startup page search and use data/page_calibration.json")
     ap.add_argument("--left-handed", action="store_true", help="the writer holds the pen in the left hand")
+    ap.add_argument("--no-record", action="store_true",
+                    help="don't write the tip points to data/sessions/tip_<time>.csv")
     a = ap.parse_args()
 
     try:
@@ -408,12 +452,14 @@ def main() -> int:
         layout = sample_layout()
     box_ids = list(layout)
     clock = RealClock()
+    record = None if a.no_record else time.strftime("data/sessions/tip_%Y%m%d_%H%M%S.csv")
     tracker = PenTracker(clock, config_from_args(a), detect_mode=a.mode,
-                         startup_calibrate=not a.use_saved_calibration, right_handed=not a.left_handed)
+                         startup_calibrate=not a.use_saved_calibration, right_handed=not a.left_handed,
+                         record_path=record)
     print(f"[tracker] pen model: {'our pen (' + PROFILE_PATH + ')' if tracker.pen_profile else 'generic'}"
           " - capture yours with: python tools/capture_pen.py")
     tracker.start()
-    guide = GuidanceEngine()
+    judge = RecentTipJudge()
     box = layout[box_ids[0]] if box_ids else None
     trail: Deque[Tuple[float, float, float]] = deque()
     last_print = 0.0
@@ -431,7 +477,10 @@ def main() -> int:
             now = clock.now()
             pen = reading.pen
             st = tracker.stats()
-            g = guide.compute(pen, box)
+            for s in tracker.drain_samples():
+                if s.source != "finger":            # only real pen-tip detections vote
+                    judge.add(s.t, s.x, s.y)
+            verdict = judge.judge(now, layout.values(), box)
 
             side = page_side(pen.x, pen.y) if pen is not None else None
             cam_view = raw.copy()
@@ -484,19 +533,27 @@ def main() -> int:
                 trail.popleft()
             for (_, x0, y0), (_, x1, y1) in zip(trail, list(trail)[1:]):
                 cv2.line(page, (int(x0 * pw), int(y0 * ph)), (int(x1 * pw), int(y1 * ph)), (0, 200, 255), 2)
-            # pen tip -> every answer box: offset to the nearest point of the box, in cm
+            # the decision: recent tip points (dots), their median (cross) and the arrow from it to the box
+            recent = judge.recent(now)
+            for _, xc, yc in recent:
+                cv2.circle(page, (int(xc / PAGE_W_CM * pw), int(yc / PAGE_H_CM * ph)), 2, (200, 0, 200), -1)
+            if verdict is not None:
+                mx, my = verdict.mx_cm / PAGE_W_CM, verdict.my_cm / PAGE_H_CM
+                mpx, mpy = int(mx * pw), int(my * ph)
+                vcol = (0, 160, 0) if verdict.inside else (255, 120, 0)
+                cv2.drawMarker(page, (mpx, mpy), vcol, cv2.MARKER_CROSS, 18, 2)
+                if not verdict.inside and verdict.dist_cm > 0:
+                    tx = int(round((mx + verdict.dx_cm / PAGE_W_CM) * pw))
+                    ty = int(round((my + verdict.dy_cm / PAGE_H_CM) * ph))
+                    cv2.arrowedLine(page, (mpx, mpy), (tx, ty), vcol, 2, tipLength=0.12)
+                    cv2.putText(page, f"{verdict.dist_cm:.1f} cm", ((mpx + tx) // 2 + 6, (mpy + ty) // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, vcol, 2)
+            # this frame's pen tip -> every answer box: offset to the nearest point of the box, in cm
             offsets = {b.id: box_offset_cm(pen.x, pen.y, b) for b in layout.values()} if pen is not None else {}
             if pen is not None:
                 col = (0, 0, 255) if pen.confidence >= 0.99 else (0, 165, 255)
                 px = int(min(pw - 6, max(5, pen.x * pw)))
                 py = int(min(ph - 6, max(5, pen.y * ph)))
-                if box is not None and box.id in offsets and offsets[box.id][2] > 0:
-                    dx, dy, dist = offsets[box.id]
-                    tx = int(round((pen.x + dx / PAGE_W_CM) * pw))
-                    ty = int(round((pen.y + dy / PAGE_H_CM) * ph))
-                    cv2.arrowedLine(page, (px, py), (tx, ty), (255, 120, 0), 2, tipLength=0.12)
-                    cv2.putText(page, f"{dist:.1f} cm", ((px + tx) // 2 + 6, (py + ty) // 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 120, 0), 2)
                 if side:      # off the page: pin a ring to the nearest edge
                     cv2.circle(page, (px, py), 9, (0, 0, 255), 2)
                     cv2.putText(page, f"OFF PAGE: {side}", (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
@@ -509,12 +566,14 @@ def main() -> int:
             else:
                 tip_line, tip_sub = "not seen", ""
             inside = next((bid for bid, o in offsets.items() if o[2] == 0), None)
-            status = box_status(inside, box, offsets)
+            status = verdict.text() if verdict is not None else "not enough recent pen points"
             panel = np.full((ph, 360, 3), 255, np.uint8)
             rows = [("PEN TIP on the paper (from top-left)", 0.5, (0, 0, 0), 1),
                     (tip_line, 0.65, (0, 0, 255), 2), (tip_sub, 0.42, (80, 80, 80), 1), ("", 0.4, 0, 1),
-                    (status, 0.55, (0, 160, 0) if inside else (255, 120, 0), 2), ("", 0.4, 0, 1),
-                    ("all boxes:", 0.45, (0, 0, 0), 1)]
+                    (f"DECISION (last {judge.window_s:.0f} s, {len(recent)} points):", 0.45, (0, 0, 0), 1),
+                    (status, 0.5, (0, 160, 0) if verdict is not None and verdict.inside else (255, 120, 0), 2),
+                    ("this frame: " + box_status(inside, box, offsets), 0.4, (120, 120, 120), 1),
+                    ("", 0.4, 0, 1), ("all boxes (this frame):", 0.45, (0, 0, 0), 1)]
             for b in layout.values():
                 active = box is not None and b.id == box.id
                 if b.id not in offsets:
@@ -525,7 +584,7 @@ def main() -> int:
                 rows.append((("> " if active else "  ") + text, 0.45,
                              (0, 160, 0) if b.id == inside else (255, 120, 0) if active else (60, 60, 60),
                              2 if active or b.id == inside else 1))
-            rows += [("", 0.4, 0, 1), ("1-9 = arrow to box N   0 = none", 0.42, (120, 120, 120), 1)]
+            rows += [("", 0.4, 0, 1), ("1-9 = target box N   0 = none", 0.42, (120, 120, 120), 1)]
             y = 24
             for text, scale, colr, thick in rows:
                 cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, scale, colr, thick)

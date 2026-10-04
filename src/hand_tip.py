@@ -67,6 +67,8 @@ DEPTH_END_DIFF_M = 0.015    # ends differing this much in height: the lower one 
 COLOUR_END_MARGIN = 8.0     # Lab distance margin for the profile's end colours to decide
 COLOUR_ENDS_DISTINCT = 20.0  # ... used only if the pen's two ends really differ in colour
 PEN_MEMORY_S = 0.5          # pen lost for less than this: no fingertip fallback (tracker holds the tip)
+END_SWITCH_S = 0.25         # the cues must name the other pen end this long before the tip switches ends
+END_KEEP_GAP_S = 0.2        # ... but only while the last tip is this recent
 NIB_MAX_FRAC = 0.12         # the nib may stick out past the pen-coloured body by this x length
 NIB_SIDE_FRAC = 0.06        # paper reference sampled this far (x length) beside the pen line
 NIB_DARKER = 0.80           # nib pixels are darker than this x the paper beside them
@@ -87,7 +89,7 @@ class TipDetection:
     entry: Point                # where the arm enters the view (full-res pixels)
     source: str = "finger"      # "pen" | "finger"
     pen_axis: Optional[Tuple[Point, Point]] = None   # (writing end, back end), full-res pixels
-    end_cue: str = ""           # what decided the writing end: "depth" | "colour" | "hand"
+    end_cue: str = ""           # what decided the writing end: "depth" | "colour" | "edge" | "hand" | "kept"
     height_m: Optional[float] = None    # tip height above the table (LiDAR), if known
 
 
@@ -108,6 +110,8 @@ class TipDetector:
         self.table = TablePlane()
         self.desk: Optional[Tuple[float, float]] = None     # (Cr, Cb) of a skin-coloured desk
         self._last_pen_t: Optional[float] = None
+        self._prev_tip: Optional[Tuple[float, float, float]] = None   # (x, y work size, t) of the last pen tip
+        self._flip_since: Optional[float] = None
         self._bg: Optional[np.ndarray] = None       # float32, work size
         self._scale = 1.0
         self._n = 0
@@ -239,7 +243,7 @@ class TipDetector:
         self.mask, self.pen_mask = hand, None
         det = None
         if hand is not None:
-            det = self._locate(small, hand, hand_area, pen, core, height)
+            det = self._locate(small, hand, hand_area, pen, core, height, t)
             det = self._remember_pen(det, t)
 
         if self._bg is not None:
@@ -295,7 +299,7 @@ class TipDetector:
         return (labels == best).view(np.uint8) * np.uint8(255), int(stats[best, cv2.CC_STAT_AREA])
 
     def _locate(self, small: np.ndarray, hand: np.ndarray, hand_area: int, pen: np.ndarray,
-                core: np.ndarray, height: Optional[np.ndarray]) -> TipDetection:
+                core: np.ndarray, height: Optional[np.ndarray], t: float = 0.0) -> TipDetection:
         h, w = hand.shape
         s = self._scale
         ys, xs = np.nonzero(hand)
@@ -321,10 +325,35 @@ class TipDetector:
         if found is None:
             return TipDetection(*full((fx, fy)), area, entry, "finger",
                                 height_m=self._height_at(height, (fx, fy), 3))
-        tip, back, cue = found
+        tip, back, cue = self._keep_end(*found, t, (w, h))
         tip = self._extend_to_nib(small, hand, tip, back)
+        self._prev_tip = (tip[0], tip[1], t)
         return TipDetection(*full(tip), area, entry, "pen", (full(tip), full(back)), cue,
                             self._height_at(height, tip, 3))
+
+    def _keep_end(self, tip: Point, back: Point, cue: str, t: float,
+                  size: Tuple[int, int]) -> Tuple[Point, Point, str]:
+        """The end cues are noisy frame to frame, and one frame on the wrong end puts the tip a pen
+        length away. A pen doesn't turn round in 1/60 s: stay on the end nearest the last tip unless
+        the cues keep naming the other end for END_SWITCH_S. An end cut off by the frame edge is
+        never the tip."""
+        prev = self._prev_tip
+        if prev is None or t - prev[2] > END_KEEP_GAP_S:
+            self._flip_since = None
+            return tip, back, cue
+        w, h = size
+        d_tip = (tip[0] - prev[0]) ** 2 + (tip[1] - prev[1]) ** 2
+        d_back = (back[0] - prev[0]) ** 2 + (back[1] - prev[1]) ** 2
+        back_at_edge = min(back[0], back[1], w - 1 - back[0], h - 1 - back[1]) <= PEN_AT_EDGE_PX
+        if d_back >= d_tip or back_at_edge:
+            self._flip_since = None
+            return tip, back, cue
+        if self._flip_since is None:
+            self._flip_since = t
+        if t - self._flip_since >= END_SWITCH_S:
+            self._flip_since = None
+            return tip, back, cue
+        return back, tip, "kept"
 
     @staticmethod
     def _extend_to_nib(small: np.ndarray, hand: np.ndarray, tip: Point, back: Point) -> Point:

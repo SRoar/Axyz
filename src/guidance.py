@@ -19,7 +19,10 @@ deeper than ENTER_INSET_CM), so following the cue always ends with in_box = True
 from __future__ import annotations
 
 import math
-from typing import Optional
+import statistics
+from collections import deque
+from dataclasses import dataclass
+from typing import Deque, Iterable, List, Optional, Tuple
 
 from src.contracts import PAGE_H_CM, PAGE_W_CM, Box, Guidance, HapticCmd, PenState, WriteStatus
 
@@ -108,6 +111,84 @@ def box_status(inside_id: Optional[str], target: Optional[Box], offsets: dict) -
     dx, dy, dist = offsets[tid]
     text = f"{tid}: {dist:.1f} cm away ({direction_words(dx, dy)})"
     return text + (f"  [now in {inside_id}]" if inside_id is not None else "")
+
+
+# --------------------------------------------------------------------------- recent-points vote
+@dataclass
+class BoxVerdict:
+    box_id: str
+    inside: bool
+    frac_in: float          # share of the recent tip points inside the box
+    n: int                  # recent tip points used
+    dx_cm: float            # median point -> nearest point of the box (0, 0 inside); dx > 0: box is right
+    dy_cm: float            # dy > 0: box is below
+    dist_cm: float
+    mx_cm: float = 0.0      # the median recent point, cm from the page's top-left
+    my_cm: float = 0.0
+
+    def text(self) -> str:
+        if self.inside:
+            return f"IN {self.box_id} ({self.frac_in:.0%} of recent points)"
+        words = direction_words(self.dx_cm, self.dy_cm)
+        how = "at the edge" if self.dist_cm < 0.3 else f"{self.dist_cm:.1f} cm away, move {words}"
+        return f"{self.box_id}: {how} ({self.frac_in:.0%} in)"
+
+
+class RecentTipJudge:
+    """Single tip readings flicker (a frame on the wrong pen end, a stray detection), so decide from
+    the recent sequence instead: IN when most of the last WINDOW_S of tip points lie in the box,
+    otherwise the direction from the MEDIAN point, which a minority of wild points can't drag."""
+    WINDOW_S = 1.0
+    MIN_POINTS = 15
+    ENTER_FRAC = 0.70       # this share of recent points inside -> IN
+    EXIT_FRAC = 0.50        # once IN, it stays IN until the share drops below this
+    EDGE_CM = 0.2           # points this little outside the box edge still count as inside
+
+    def __init__(self, page_w_cm: float = PAGE_W_CM, page_h_cm: float = PAGE_H_CM,
+                 window_s: Optional[float] = None) -> None:
+        self.page_w_cm, self.page_h_cm = page_w_cm, page_h_cm
+        self.window_s = self.WINDOW_S if window_s is None else window_s
+        self.points: Deque[Tuple[float, float, float]] = deque()     # (t, x_cm, y_cm)
+        self._inside_id: Optional[str] = None
+
+    def add(self, t: float, x: float, y: float) -> None:
+        """A fresh page-normalized tip detection (not a held / extrapolated one)."""
+        self.points.append((t, x * self.page_w_cm, y * self.page_h_cm))
+        while self.points and self.points[0][0] < t - self.window_s:
+            self.points.popleft()
+
+    def recent(self, now: float) -> List[Tuple[float, float, float]]:
+        return [p for p in self.points if p[0] >= now - self.window_s]
+
+    def _vote(self, pts: List[Tuple[float, float, float]], box: Box) -> BoxVerdict:
+        W, H, e = self.page_w_cm, self.page_h_cm, self.EDGE_CM
+        x0, x1, y0, y1 = box.xmin * W - e, box.xmax * W + e, box.ymin * H - e, box.ymax * H + e
+        n_in = sum(1 for _, x, y in pts if x0 <= x <= x1 and y0 <= y <= y1)
+        mx = statistics.median(p[1] for p in pts)
+        my = statistics.median(p[2] for p in pts)
+        dx = _axis_delta(mx, box.xmin * W, box.xmax * W)
+        dy = _axis_delta(my, box.ymin * H, box.ymax * H)
+        return BoxVerdict(box.id, False, n_in / len(pts), len(pts), dx, dy, math.hypot(dx, dy), mx, my)
+
+    def judge(self, now: float, boxes: Iterable[Box], target: Optional[Box] = None) -> Optional[BoxVerdict]:
+        """Verdict for the target box (no target: the box most recent points are in, else the
+        box nearest the median point). None = too few recent points to say."""
+        pts = self.recent(now)
+        if len(pts) < self.MIN_POINTS:
+            self._inside_id = None
+            return None
+        if target is not None:
+            v = self._vote(pts, target)
+        else:
+            votes = [self._vote(pts, b) for b in boxes]
+            if not votes:
+                return None
+            v = max(votes, key=lambda b: (b.frac_in, -b.dist_cm))
+            if v.frac_in < self.EXIT_FRAC:
+                v = min(votes, key=lambda b: b.dist_cm)
+        v.inside = v.frac_in >= (self.EXIT_FRAC if v.box_id == self._inside_id else self.ENTER_FRAC)
+        self._inside_id = v.box_id if v.inside else None
+        return v
 
 
 class GuidanceEngine:

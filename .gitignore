@@ -15,6 +15,7 @@ __pycache__/
 .idea/
 
 # Captured images / logs
+data/sessions/
 *.jpg
 *.jpeg
 *.png

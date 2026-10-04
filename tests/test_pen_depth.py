@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 from src.depth_plane import TablePlane, fit_inverse_plane
-from src.hand_tip import TipDetector
+from src.hand_tip import END_KEEP_GAP_S, END_SWITCH_S, TipDetector
 from src.pen_profile import PenProfile, build_profile, segment_pen
 from tests.test_tracker import PEN, SKIN, WOOD, H, W, hand_image, hand_with_pen, page_image
 
@@ -95,3 +95,22 @@ def test_pen_profile_capture_and_probability(tmp_path):
     assert np.abs(again.probability(img).astype(int) - p.astype(int)).max() <= 2
     d = TipDetector(profile=again).detect(img)
     assert d.source == "pen" and np.hypot(d.x - tip[0], d.y - tip[1]) < 12, d
+
+
+def test_tip_stays_on_its_pen_end_through_a_brief_flip():
+    d, size = TipDetector(), (400, 300)
+    d._prev_tip = (100.0, 100.0, 0.0)
+    tip, back, cue = d._keep_end((300.0, 100.0), (102.0, 100.0), "hand", 1 / 60, size)
+    assert tip == (102.0, 100.0) and back == (300.0, 100.0) and cue == "kept"
+    # the cues keep naming the other end for END_SWITCH_S: then it switches
+    d._prev_tip = (102.0, 100.0, END_SWITCH_S)
+    assert d._keep_end((300.0, 100.0), (102.0, 100.0), "hand", END_SWITCH_S + 0.02, size)[2] == "hand"
+
+
+def test_tip_end_is_not_kept_at_the_frame_edge_or_after_a_gap():
+    d, size = TipDetector(), (400, 300)
+    d._prev_tip = (390.0, 100.0, 0.0)
+    assert d._keep_end((250.0, 100.0), (399.0, 100.0), "hand", 1 / 60, size)[0] == (250.0, 100.0)
+    d, size = TipDetector(), (400, 300)
+    d._prev_tip = (100.0, 100.0, 0.0)
+    assert d._keep_end((300.0, 100.0), (102.0, 100.0), "hand", END_KEEP_GAP_S + 0.05, size)[0] == (300.0, 100.0)
