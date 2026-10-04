@@ -102,8 +102,11 @@ def order_corners(pts: Sequence[Sequence[float]]) -> np.ndarray:
     return np.float32([p[np.argmin(s)], p[np.argmin(d)], p[np.argmax(s)], p[np.argmax(d)]])
 
 
-def detect_page_corners(frame: np.ndarray, min_area_frac: float = 0.08) -> Optional[np.ndarray]:
-    """Find the white sheet on a darker desk: largest bright 4-sided contour. None if not found."""
+def detect_page_corners(frame: np.ndarray, min_area_frac: float = 0.08,
+                        min_contrast: float = 30.0, border_px: int = 3) -> Optional[np.ndarray]:
+    """Find the white sheet on a darker desk: largest bright 4-sided contour. None if not found.
+    Rejects quads touching the frame edge (page not fully in view / no page at all) and quads that
+    are not clearly brighter than their surroundings."""
     gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (7, 7), 0)
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
@@ -115,25 +118,68 @@ def detect_page_corners(frame: np.ndarray, min_area_frac: float = 0.08) -> Optio
         peri = cv2.arcLength(c, True)
         for eps in (0.02, 0.03, 0.05):
             approx = cv2.approxPolyDP(c, eps * peri, True)
-            if len(approx) == 4 and cv2.isContourConvex(approx):
-                return order_corners(approx.reshape(4, 2))
+            if len(approx) != 4 or not cv2.isContourConvex(approx):
+                continue
+            q = approx.reshape(4, 2)
+            if (q[:, 0].min() < border_px or q[:, 1].min() < border_px
+                    or q[:, 0].max() > w - 1 - border_px or q[:, 1].max() > h - 1 - border_px):
+                break
+            inside = np.zeros_like(gray)
+            cv2.fillConvexPoly(inside, q.astype(np.int32), 255)
+            if cv2.mean(gray, inside)[0] - cv2.mean(gray, 255 - inside)[0] < min_contrast:
+                break
+            return order_corners(q)
     return None
+
+
+class StablePageDetector:
+    """Hands-free calibration: accepts the auto-detected page once its corners have stayed
+    within `tol_px` for `hold_s` seconds (a hand over a corner restarts the countdown)."""
+
+    def __init__(self, hold_s: float = 1.5, tol_px: float = 4.0) -> None:
+        self.hold_s, self.tol_px = hold_s, tol_px
+        self.reset()
+
+    def reset(self) -> None:
+        self._ref: Optional[np.ndarray] = None
+        self._since = 0.0
+        self.corners: Optional[np.ndarray] = None
+
+    def update(self, frame: np.ndarray, t: float) -> float:
+        """Feed one frame; returns progress 0..1 (1 = stable, `corners` is ready to use)."""
+        found = detect_page_corners(frame)
+        if found is None:
+            self.reset()
+            return 0.0
+        if self._ref is None or np.abs(found - self._ref).max() > self.tol_px:
+            self._ref, self._since = found, t
+        self.corners = 0.7 * self.corners + 0.3 * found if self.corners is not None and \
+            np.abs(found - self.corners).max() <= self.tol_px else found
+        return min(1.0, (t - self._since) / self.hold_s) if self.hold_s > 0 else 1.0
 
 
 # --------------------------------------------------------------------------- interactive UI
 def click_corners(get_frame: Callable[[], Optional[np.ndarray]], window: str = "calibrate page",
-                  initial: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+                  initial: Optional[np.ndarray] = None, auto: bool = True,
+                  auto_accept_s: Optional[float] = None) -> Optional[np.ndarray]:
     """
-    Live view; click the 4 page corners in order TL, TR, BR, BL (drag a point to adjust).
-    Keys: a = auto-detect   r = restart   ENTER = accept (needs 4 points)   ESC = cancel
+    Live view. AUTO mode (default) finds the page by itself and keeps the outline on it. With
+    `auto_accept_s` it also ACCEPTS by itself once the page has held still that long (no keys);
+    otherwise press ENTER. Clicking or dragging switches to manual: click the 4 page corners in
+    order TL, TR, BR, BL (drag a point to adjust).
+    Keys: a = back to auto   r = restart manual clicking   ENTER = accept (needs 4 points)   ESC = cancel
     Returns (4, 2) float32 corners or None if cancelled.
     """
     pts: List[List[float]] = [] if initial is None else np.asarray(initial, np.float32).tolist()
-    state = {"drag": None, "mouse": (0, 0)}
+    state = {"drag": None, "mouse": (0, 0), "auto": auto, "found": False}
+    stable = StablePageDetector(hold_s=auto_accept_s or 0.0)
+    progress = 0.0
+    n_frame = 0
 
     def on_mouse(event, x, y, flags, _param):
         state["mouse"] = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
+            state["auto"] = False
             near = [i for i, p in enumerate(pts) if (p[0] - x) ** 2 + (p[1] - y) ** 2 < 15 ** 2]
             if near:
                 state["drag"] = near[0]
@@ -153,31 +199,52 @@ def click_corners(get_frame: Callable[[], Optional[np.ndarray]], window: str = "
             if cv2.waitKey(10) & 0xFF == 27:
                 break
             continue
+        n_frame += 1
+        if state["auto"] and n_frame % 3 == 0:
+            progress = stable.update(frame, time.monotonic())
+            state["found"] = stable.corners is not None
+            if stable.corners is not None:
+                pts[:] = stable.corners.tolist()
+            if auto_accept_s and progress >= 1.0:
+                result = np.float32(pts)
+                break
+        elif not state["auto"]:
+            stable.reset()
+            progress = 0.0
         view = frame.copy()
         h, w = view.shape[:2]
+        auto_ok = state["auto"] and state["found"]
+        col = (0, 255, 0) if (auto_ok or not state["auto"]) else (0, 165, 255)
         if len(pts) >= 2:
-            cv2.polylines(view, [np.int32(pts)], len(pts) == 4, (0, 255, 0), 2)
+            cv2.polylines(view, [np.int32(pts)], len(pts) == 4, col, 2)
         for i, p in enumerate(pts):
             cv2.circle(view, (int(p[0]), int(p[1])), 6, (0, 0, 255), 2)
             cv2.putText(view, CORNER_NAMES[i], (int(p[0]) + 8, int(p[1]) - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         _draw_loupe(view, frame, state["mouse"])
-        msg = (f"click {CORNER_NAMES[len(pts)]} corner of the page" if len(pts) < 4
-               else "ENTER = accept   drag to adjust")
-        cv2.putText(view, msg + "   a=auto  r=restart  ESC=cancel", (10, h - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        if state["auto"]:
+            if auto_ok and auto_accept_s:
+                msg = f"AUTO: page found - hold still... saving in {max(0.0, (1 - progress) * auto_accept_s):.1f}s"
+                cv2.rectangle(view, (10, h - 70), (10 + int(progress * (w - 20)), h - 60), (0, 255, 0), -1)
+            elif auto_ok:
+                msg = "AUTO: page found - ENTER = accept, click a corner to adjust"
+            else:
+                msg = "AUTO: looking for the page (whole sheet in view, darker desk)... or click corners"
+        else:
+            msg = (f"click {CORNER_NAMES[len(pts)]} corner of the page" if len(pts) < 4
+                   else "ENTER = accept   drag to adjust")
+        cv2.putText(view, msg, (10, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+        cv2.putText(view, "a=auto  r=restart manual  ESC=cancel", (10, h - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
         cv2.imshow(window, view)
         key = cv2.waitKey(15) & 0xFF
         if key == 27:
             break
         if key == ord("r"):
+            state["auto"] = False
             pts.clear()
         elif key == ord("a"):
-            found = detect_page_corners(frame)
-            if found is None:
-                print("[calibrate] auto-detect failed: click the corners (dark desk + white page helps)")
-            else:
-                pts[:] = found.tolist()
+            state["auto"] = True
         elif key in (13, 10) and len(pts) == 4:
             result = np.float32(pts)
             break

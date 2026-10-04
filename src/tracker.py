@@ -31,7 +31,7 @@ import numpy as np
 
 from src.contracts import PAGE_H_CM, PAGE_W_CM, Clock, PenState, RealClock, TrackerReading
 from src.marker import MARKER_PATH, Detection, MarkerDetector, load_marker_params
-from src.page_calibration import CALIB_PATH, PageCalibration
+from src.page_calibration import CALIB_PATH, PageCalibration, StablePageDetector
 from src.webcam import CameraConfig, Frame, load_camera_config, make_camera
 
 FRESH_S = 0.08          # a measurement younger than this is reported as-is
@@ -104,8 +104,10 @@ class PenTracker:
 
     def __init__(self, clock: Clock, camera_cfg: Optional[CameraConfig] = None,
                  calib_path: str = CALIB_PATH, marker_path: str = MARKER_PATH,
-                 hud_frame: bool = True, camera: Any = None) -> None:
+                 hud_frame: bool = True, camera: Any = None, auto_calibrate: bool = True) -> None:
         self.clock = clock
+        self.auto_calibrate = auto_calibrate
+        self._page_auto = StablePageDetector(hold_s=1.5)
         self.camera_cfg = camera_cfg
         self.calib_path, self.marker_path = calib_path, marker_path
         self.hud_frame = hud_frame
@@ -135,8 +137,10 @@ class PenTracker:
             self.cam = make_camera(self.camera_cfg or load_camera_config(), time_fn=self.clock.now)
         self.cam.start()
         if self._calib_file is None:
-            print(f"[tracker] no {self.calib_path}: reporting camera-normalized coords. "
-                  "Run `python tools/calibrate_page.py`.")
+            print(f"[tracker] no {self.calib_path}: "
+                  + ("calibrating automatically once the whole page is in view and still."
+                     if self.auto_calibrate else "reporting camera-normalized coords. "
+                     "Run `python tools/calibrate_page.py`."))
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="pen-tracker", daemon=True)
         self._thread.start()
@@ -179,6 +183,7 @@ class PenTracker:
         """Re-read data/page_calibration.json and data/marker_hsv.json (after re-tuning)."""
         self._calib_file = PageCalibration.load(self.calib_path)
         self._calib, self._calib_shape = None, None
+        self._page_auto.reset()
         self.detector = MarkerDetector(load_marker_params(self.marker_path))
         self._fx.reset()
         self._fy.reset()
@@ -227,8 +232,14 @@ class PenTracker:
     def _process(self, f: Frame) -> None:
         t0 = time.perf_counter()
         img = f.image
-        calib = self._calibration_for(img.shape)
         h, w = img.shape[:2]
+        if self._calib_file is None and self.auto_calibrate and f.id % 10 == 0:
+            if self._page_auto.update(img, f.t) >= 1.0:
+                found = PageCalibration(self._page_auto.corners, (w, h))
+                found.save(self.calib_path)
+                self._calib_file, self._calib, self._calib_shape = found, None, None
+                print(f"[tracker] page found and calibrated automatically -> {self.calib_path}")
+        calib = self._calibration_for(img.shape)
 
         prev = self._meas
         predict = (prev.px, prev.py) if prev is not None and f.t - prev.t <= HOLD_S else None
@@ -297,7 +308,7 @@ def main() -> int:
     box = layout[box_ids[0]] if box_ids else None
     trail: Deque[Tuple[float, float, float]] = deque()
     last_print = 0.0
-    print("keys: c = calibrate page   1-9 = guidance to box N   0 = no box   "
+    print("keys: c = recalibrate page (hands-free)   1-9 = guidance to box N   0 = no box   "
           "s = save snapshot   r = reload calibration/marker   ESC = quit")
     try:
         while True:
@@ -325,7 +336,7 @@ def main() -> int:
                         f"{st['proc_ms']:.1f} ms/frame  detect {st['detect_rate'] * 100:.0f}%",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, fps_col, 2)
             if calib is None:
-                cv2.putText(cam_view, "NOT CALIBRATED: press c", (10, 60),
+                cv2.putText(cam_view, "NOT CALIBRATED: show the whole page, hold still (or press c)", (10, 60),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             cv2.imshow("tracker: camera", cam_view)
 
@@ -364,7 +375,7 @@ def main() -> int:
             if key == 27:
                 break
             if key == ord("c"):
-                corners = click_corners(lambda: tracker.raw_frame())
+                corners = click_corners(lambda: tracker.raw_frame(), auto_accept_s=1.5)
                 if corners is not None:
                     h, w = raw.shape[:2]
                     PageCalibration(corners, (w, h)).save(tracker.calib_path)

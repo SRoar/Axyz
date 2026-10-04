@@ -7,7 +7,7 @@ import pytest
 
 from src.contracts import SimClock, Tracker
 from src.marker import MarkerDetector, build_mask, sample_hsv_range
-from src.page_calibration import PageCalibration, detect_page_corners, order_corners
+from src.page_calibration import PageCalibration, StablePageDetector, detect_page_corners, order_corners
 from src.tracker import FRESH_S, HOLD_S, Measurement, OneEuro, PenTracker, hold_or_extrapolate
 from src.webcam import Frame
 
@@ -60,6 +60,18 @@ def test_order_and_auto_detect_corners():
     assert np.allclose(order_corners(shuffled), CORNERS)
     found = detect_page_corners(page_image())
     assert found is not None and np.abs(found - CORNERS).max() < 4
+
+
+def test_stable_page_detector_waits_for_a_still_page():
+    det = StablePageDetector(hold_s=1.5)
+    img = page_image()
+    assert det.update(img, 0.0) == 0.0
+    assert 0.0 < det.update(img, 1.0) < 1.0
+    assert det.update(img, 1.6) == 1.0 and np.abs(det.corners - CORNERS).max() < 4
+    covered = img.copy()
+    covered[:, :] = 40                                   # page gone (e.g. lifted away)
+    assert det.update(covered, 1.7) == 0.0 and det.corners is None
+    assert det.update(img, 1.8) == 0.0                   # countdown restarts
 
 
 # --------------------------------------------------------------------------- marker
@@ -217,3 +229,28 @@ def test_pen_tracker_end_to_end(tracker):
 
     snap = tr.snapshot()
     assert snap.shape[:2] == (1118, 864)
+
+
+def test_pen_tracker_calibrates_itself_when_no_file(tmp_path):
+    import json
+    calib = tmp_path / "calib.json"
+    marker = tmp_path / "marker.json"
+    marker.write_text(json.dumps(GREEN))
+    clock = SimClock(0.0)
+    cam = ScriptedCamera()
+    tr = PenTracker(clock, calib_path=str(calib), marker_path=str(marker), camera=cam)
+    tr.start()
+    try:
+        img = page_image((0.5, 0.5))
+        for i in range(1, 75):                           # 2.5 s of a still page at 30 fps
+            clock.t = i / 30
+            _push_and_wait(tr, cam, img, clock.t)
+        assert calib.exists() and tr.calibration is not None
+        saved = PageCalibration.load(str(calib))
+        assert np.abs(saved.corners_px - CORNERS).max() < 4
+        clock.t += 1 / 30
+        _push_and_wait(tr, cam, img, clock.t)
+        p = tr.read().pen
+        assert p is not None and abs(p.x - 0.5) < 0.01 and abs(p.y - 0.5) < 0.01
+    finally:
+        tr.stop()
