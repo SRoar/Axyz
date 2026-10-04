@@ -9,6 +9,8 @@ TactileReader / Illumin -- the one command that runs the whole system.   Owner: 
     --debug-keys   keys 1-4 inject STILL/MOVING/WRITING/LIFTED, t = triple tap (done),
                    r = single tap (repeat), n = double tap (skip), 0 = release the override.
                    A dead sensor can't kill the demo.  (Works with or without a real IMU.)
+    --web [PORT]   also serve the browser UI + live data at http://localhost:8765 (see ui/README.md).
+                   With --headless it keeps serving until Ctrl-C (add --exit-on-complete to stop sooner).
     --record F.mp4 screen-record the HUD (the backup video).      --headless  no window (CI / soak)
     --fast         fakes only: simulated clock, no sleeping (instant run, deterministic)
     q / ESC / close the window = quit.   s = save a HUD screenshot to captures/.
@@ -132,6 +134,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--fast", action="store_true", help="fakes only: simulated clock, no sleeping")
     ap.add_argument("--max-seconds", type=float, default=0.0, help="stop after N seconds (0 = no limit)")
     ap.add_argument("--exit-on-complete", action="store_true", help="close the window ~4 s after COMPLETE")
+    ap.add_argument("--web", nargs="?", const=8765, default=None, type=int, metavar="PORT",
+                    help="serve the browser UI + live data (default port 8765)")
+    ap.add_argument("--web-host", default="127.0.0.1",
+                    help="bind address; use 0.0.0.0 to open the UI from a phone/tablet on the same Wi-Fi")
+    ap.add_argument("--open-ui", action="store_true", help="open the UI in the default browser (needs --web)")
     return ap.parse_args(argv)
 
 
@@ -152,10 +159,13 @@ def make_system(args: argparse.Namespace):
     realtime = needs_realtime(real)
     if args.fast and realtime:
         raise SystemExit("--fast only works with fakes (real hardware needs the wall clock)")
+    if args.fast and args.web is not None:
+        raise SystemExit("--web streams in real time; drop --fast")
     clock: Clock = SimClock() if args.fast else RealClock()
     questions, layout = load_data(args.questions, args.layout)
     try:
-        comps = build(real, clock, questions, layout, render=not args.headless or bool(args.record))
+        comps = build(real, clock, questions, layout,
+                      render=not args.headless or bool(args.record) or args.web is not None)
     except ImportError as e:
         missing = [n for n in real if REAL[n][0] == getattr(e, "name", None)]
         who = ", ".join(OWNER[n] for n in missing) or "the owner of that module"
@@ -173,6 +183,19 @@ def run(args: argparse.Namespace) -> int:
 
     system, clock, debug = make_system(args)
     hud = Hud(system, debug)
+    bridge = None
+    if args.web is not None:
+        from src.web import WebBridge
+        try:
+            bridge = WebBridge(system, debug, host=args.web_host, port=args.web)
+            bridge.start()
+        except OSError as e:
+            raise SystemExit(f"cannot start the web UI on {args.web_host}:{args.web}: {e}\n"
+                             f" -> is another run still going? try --web {args.web + 1}")
+        print(f"[main] UI: {bridge.url}   (live data{'; debug keys enabled' if debug else ''})")
+        if args.open_ui:
+            import webbrowser
+            webbrowser.open(bridge.url)
     show = not args.headless
     realtime = not args.fast
     writer = None
@@ -190,8 +213,16 @@ def run(args: argparse.Namespace) -> int:
             print(f"[main] cannot open {args.record} for writing; recording disabled", file=sys.stderr)
             writer = None
     if show:
-        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW, 1280, 720)
+        try:
+            cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(WINDOW, 1280, 720)
+        except cv2.error:
+            # opencv-python-headless, or WSL/SSH without a display: no cv2 window is possible.
+            # Carry on exactly as if --headless was given (the web UI keeps serving).
+            show = False
+            args.headless = True
+            hint = f"open {bridge.url}" if bridge is not None else "add --web to get a browser UI"
+            print(f"[main] no display for the cv2 HUD window; running headless ({hint})", file=sys.stderr)
 
     print(f"[main] real={sorted(parse_real(args.real)) or 'none (all fakes)'}  debug_keys={args.debug_keys}  "
           f"{'fast/sim clock' if args.fast else 'real time'}.  q / ESC to quit.")
@@ -205,6 +236,8 @@ def run(args: argparse.Namespace) -> int:
         while running:
             system.step()
             hud.observe()
+            if bridge is not None:
+                bridge.observe()
             now = clock.now()
 
             if now >= next_draw:
@@ -237,7 +270,9 @@ def run(args: argparse.Namespace) -> int:
 
             if system.c.brain.phase == Phase.COMPLETE:
                 complete_at = complete_at if complete_at is not None else now
-                if (args.headless or args.exit_on_complete) and now - complete_at > (0.5 if args.headless else 4.0):
+                serve_on = bridge is not None and args.headless and not args.exit_on_complete
+                if (args.headless or args.exit_on_complete) and not serve_on \
+                        and now - complete_at > (0.5 if args.headless else 4.0):
                     break
             if args.max_seconds and now - t_begin >= args.max_seconds:
                 break
@@ -252,6 +287,8 @@ def run(args: argparse.Namespace) -> int:
             else:
                 clock.advance(DT)
     finally:
+        if bridge is not None:
+            bridge.stop()
         system.stop()
         if writer is not None:
             writer.release()

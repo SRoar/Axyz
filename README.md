@@ -29,12 +29,16 @@ python -m src.main --real all --record demo/backup_run.mp4   # record the HUD (b
 `--debug-keys`: `1` STILL · `2` MOVING · `3` WRITING · `4` LIFTED · `t` triple tap (done) · `r` single tap (repeat) · `n` double tap (skip) · `0` release override. `q`/ESC quits, `s` saves a screenshot.
 Other flags: `--headless` (no window), `--fast` (fakes only, simulated clock), `--max-seconds N`, `--exit-on-complete`.
 
+## Browser UI
+`python -m src.main --web` serves a live view at http://localhost:8765 (camera with labeled boxes, voice waveform, pen probe,
+buzzers, gesture cues, audit). `ui/index.html` also opens by itself with demo data. See `ui/README.md`.
+
 ## Layout
 | Path | What | Owner |
 |---|---|---|
 | `src/contracts.py` | types, serial protocol, interfaces (single source of truth) | Dev 4 |
 | `src/fakes.py`, `src/factory.py`, `src/sim.py`, `src/system.py` | fakes, real/fake wiring, headless sim, the glue loop | Dev 4 |
-| `src/main.py`, `src/hud.py` | CLI + 50 Hz loop, judges' HUD | Dev 4 |
+| `src/main.py`, `src/hud.py`, `src/web.py`, `ui/` | CLI + 50 Hz loop, judges' HUD, browser UI + its bridge | Dev 4 |
 | `src/audit.py` | Gemini answer auditor with pixel fallback | Dev 4 |
 | `src/arduino_link.py`, `firmware/` | pen probe link + firmware | Dev 1 |
 | `src/tracker.py`, `src/guidance.py`, `src/prescan.py` | vision + geometry | Dev 2 |

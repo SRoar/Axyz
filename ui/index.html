@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Illumin</title>
+  <meta name="description" content="Live view of a paper test taken with the Illumin pen: camera, voice, haptics and answer audit.">
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- Icon sprite: one outline SVG per icon on currentColor. State comes from CSS color, never from a second asset. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="i-still" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.6"/><circle cx="12" cy="12" r="8"/></symbol>
+    <symbol id="i-moving" viewBox="0 0 24 24"><path d="M4 12h14M13 6.5l5.5 5.5-5.5 5.5"/></symbol>
+    <symbol id="i-writing" viewBox="0 0 24 24"><path d="M4 20l1-4.2L16.3 4.5a2.1 2.1 0 0 1 3 3L8 18.8 4 20z"/><path d="M14.2 6.6l3.2 3.2"/></symbol>
+    <symbol id="i-lifted" viewBox="0 0 24 24"><path d="M12 17.5V5.5M7 10.5l5-5 5 5"/><path d="M5 21h14"/></symbol>
+    <symbol id="i-pending" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7.5"/></symbol>
+    <symbol id="i-active" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></symbol>
+    <symbol id="i-answered" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-skipped" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-unchecked" viewBox="0 0 24 24"><path d="M9.2 9.2a3 3 0 1 1 4.2 2.7c-.9.5-1.4 1-1.4 2"/><path d="M12 17.5v.01"/></symbol>
+    <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M4 9.5v5h3.8L13 18.5v-13L7.8 9.5H4z"/><path d="M16.4 8.8a4.6 4.6 0 0 1 0 6.4"/><path d="M18.6 6.4a8 8 0 0 1 0 11.2"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></symbol>
+    <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20l1-4.2L16.3 4.5a2.1 2.1 0 0 1 3 3L8 18.8 4 20z"/></symbol>
+  </defs>
+</svg>
+
+<div class="app is-booting" id="app" data-source="fake" data-phase="IDLE" data-motion="STILL" data-debug="false">
+
+  <header class="bar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="3" y="3" width="26" height="26" rx="8"/>
+        <path d="M10 22l1.2-4.4 8.6-8.6a2 2 0 0 1 2.8 2.8l-8.6 8.6L10 22z"/>
+      </svg>
+      <span class="brand-name">Illumin</span>
+    </div>
+
+    <div class="phase" id="phase" aria-live="polite">
+      <span class="phase-dot" aria-hidden="true"></span>
+      <div class="phase-text">
+        <h1 class="phase-name"><span class="t-text" id="phaseName">Idle</span></h1>
+        <p class="phase-sub"><span class="t-text" id="phaseSub">Hold the pen still to hear the next question.</span></p>
+      </div>
+    </div>
+
+    <div class="bar-tools">
+      <div class="health" id="health" role="status"></div>
+      <div class="menu-wrap">
+        <button class="conn" id="connBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="connMenu">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <span id="connLabel">Demo data</span>
+          <svg class="icon conn-chev" aria-hidden="true"><use href="#i-chevron"/></svg>
+        </button>
+        <div class="menu t-dropdown" id="connMenu" role="menu" data-open="false" aria-label="Operator tools">
+          <div class="menu-group">
+            <p class="menu-title">Data source</p>
+            <div class="seg" role="group" aria-label="Data source">
+              <button type="button" class="seg-btn" data-source-pick="live">Live</button>
+              <button type="button" class="seg-btn" data-source-pick="fake">Demo</button>
+            </div>
+          </div>
+          <div class="menu-group">
+            <p class="menu-title">Pen state</p>
+            <div class="seg seg-4" role="group" aria-label="Override pen state">
+              <button type="button" class="seg-btn" data-key="1">Still <kbd>1</kbd></button>
+              <button type="button" class="seg-btn" data-key="2">Moving <kbd>2</kbd></button>
+              <button type="button" class="seg-btn" data-key="3">Writing <kbd>3</kbd></button>
+              <button type="button" class="seg-btn" data-key="4">Lifted <kbd>4</kbd></button>
+            </div>
+            <button type="button" class="seg-btn seg-wide" data-key="0">Release to the sensor <kbd>0</kbd></button>
+          </div>
+          <div class="menu-group">
+            <p class="menu-title">Taps</p>
+            <div class="seg seg-3" role="group" aria-label="Send a tap">
+              <button type="button" class="seg-btn" data-key="r">Repeat <kbd>r</kbd></button>
+              <button type="button" class="seg-btn" data-key="n">Skip <kbd>n</kbd></button>
+              <button type="button" class="seg-btn" data-key="t">Done <kbd>t</kbd></button>
+            </div>
+          </div>
+          <p class="menu-note" id="menuNote"></p>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <!-- Left: what the student is asked, and where they are in the test -->
+    <aside class="rail rail-left" aria-label="Question">
+      <section class="sec">
+        <p class="qcount"><span class="qnum" id="qNum" aria-label="Question number">1</span><span class="qof">of <span id="qTotal">3</span></span></p>
+        <p class="question-text"><span class="t-text" id="qText">Waiting for the first question.</span></p>
+      </section>
+
+      <section class="sec">
+        <h2>Answers</h2>
+        <ol class="steps" id="steps"></ol>
+      </section>
+
+      <section class="sec sec-grow">
+        <h2>Said aloud</h2>
+        <ol class="said" id="said"></ol>
+      </section>
+    </aside>
+
+    <!-- Centre: the camera. The page is the hero; everything else is quiet. -->
+    <main class="stage" id="stage">
+      <div class="page-wrap" id="pageWrap">
+        <div class="page" id="page">
+          <div class="feed" id="feed">
+            <img id="feedImg" alt="Overhead camera view of the test sheet" hidden>
+            <canvas id="feedCanvas" role="img" aria-label="Demo camera view of the test sheet"></canvas>
+          </div>
+          <div class="boxes" id="boxes"></div>
+          <canvas class="trail" id="trail" aria-hidden="true"></canvas>
+
+          <div class="pen" id="pen" aria-hidden="true"><span class="pen-ring"></span><span class="pen-dot"></span></div>
+
+          <div class="gestures" id="gestures" aria-hidden="true">
+            <svg class="g-svg" viewBox="-100 -100 200 200" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <g id="gLeft"><path class="gc" d="M5 -10L-5 0L5 10"/><path class="gc" d="M5 -10L-5 0L5 10"/><path class="gc" d="M5 -10L-5 0L5 10"/></g>
+              <g id="gRight"><path class="gc" d="M-5 -10L5 0L-5 10"/><path class="gc" d="M-5 -10L5 0L-5 10"/><path class="gc" d="M-5 -10L5 0L-5 10"/></g>
+              <g id="gDown"><path class="gc" d="M-10 -5L0 5L10 -5"/><path class="gc" d="M-10 -5L0 5L10 -5"/><path class="gc" d="M-10 -5L0 5L10 -5"/></g>
+              <g id="gUp"><path class="gc" d="M-10 5L0 -5L10 5"/><path class="gc" d="M-10 5L0 -5L10 5"/><path class="gc" d="M-10 5L0 -5L10 5"/></g>
+              <g id="gSides"><circle class="gs gs-l" cx="-40" cy="0" r="3.5" fill="currentColor" stroke="none"/><circle class="gs gs-r" cx="40" cy="0" r="3.5" fill="currentColor" stroke="none"/></g>
+              <g id="gLock"><circle class="gr gr-1" r="30"/><circle class="gr gr-2" r="44"/></g>
+              <g id="gWarn"><path class="ga ga-l" d="M-30 -24A38 38 0 0 0 -30 24" stroke-width="3.6"/><path class="ga ga-r" d="M30 -24A38 38 0 0 1 30 24" stroke-width="3.6"/></g>
+              <g id="gDone"><rect class="gb" x="-19" y="2" width="9" height="14" rx="3"/><rect class="gb" x="-4.5" y="-6" width="9" height="22" rx="3"/><rect class="gb" x="10" y="-14" width="9" height="30" rx="3"/></g>
+            </svg>
+            <p class="g-caption"><span class="t-text" id="gCaption"></span></p>
+            <p class="tap-badge t-badge" id="tapBadge"><span class="tap-dots" id="tapDots"></span><span id="tapWord"></span></p>
+          </div>
+
+          <p class="cam-label"><span class="cam-dot" aria-hidden="true"></span><span id="camLabel">Overhead camera</span></p>
+
+          <p class="lost t-badge" id="lost" role="status"></p>
+          <p class="reach t-badge" id="reach" role="status"><svg class="icon" aria-hidden="true"><use href="#i-pen"/></svg><span>Pick up the pen</span></p>
+        </div>
+      </div>
+
+      <div class="dock-slot">
+        <div class="dock t-panel" id="dock" data-open="false" aria-hidden="true">
+          <svg class="icon dock-icon" aria-hidden="true"><use href="#i-speaker"/></svg>
+          <p class="dock-text"><span class="t-text" id="dockText"></span></p>
+          <div class="wave" id="wave" aria-hidden="true"></div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right: what the pen is doing, what it is telling the hand, and what the camera concluded -->
+    <aside class="rail rail-right" aria-label="Pen and feedback">
+      <section class="sec imu" id="imuSec" data-motion="STILL">
+        <h2>Pen probe</h2>
+        <div class="imu-state">
+          <span class="t-icon-slot imu-icon" id="imuIcon">
+            <svg class="icon t-icon" data-k="STILL"><use href="#i-still"/></svg>
+            <svg class="icon t-icon" data-k="MOVING"><use href="#i-moving"/></svg>
+            <svg class="icon t-icon" data-k="WRITING"><use href="#i-writing"/></svg>
+            <svg class="icon t-icon" data-k="LIFTED"><use href="#i-lifted"/></svg>
+          </span>
+          <span class="imu-label"><span class="t-text" id="imuLabel">Still</span></span>
+        </div>
+        <canvas class="imu-wave" id="imuWave" aria-label="Accelerometer trace" role="img"></canvas>
+        <div class="imu-meta">
+          <span>Light <b class="num" id="lightVal">0</b></span>
+          <ul class="taps" id="taps" aria-label="Tap gestures">
+            <li data-n="1"><span class="tap-pips"><i></i></span>repeat</li>
+            <li data-n="2"><span class="tap-pips"><i></i><i></i></span>skip</li>
+            <li data-n="3"><span class="tap-pips"><i></i><i></i><i></i></span>done</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="sec buzz" id="buzzSec">
+        <h2>Buzzers</h2>
+        <div class="buzz-row">
+          <span class="lamp" id="lampL"><i></i>Left</span>
+          <span class="buzz-cmd"><span class="t-text" id="buzzCmd">Silent</span></span>
+          <span class="lamp" id="lampR">Right<i></i></span>
+        </div>
+        <ol class="buzz-log" id="buzzLog"></ol>
+      </section>
+
+      <section class="sec" id="guideSec">
+        <h2>Guidance</h2>
+        <p class="guide-say" id="guideSay">No active box.</p>
+        <p class="guide-nums"><span>Across <b class="num" id="gDx">0.0</b> cm</span><span>Down <b class="num" id="gDy">0.0</b> cm</span><span id="gState" class="guide-state">Unknown</span></p>
+      </section>
+
+      <section class="sec sec-grow">
+        <h2>Last audit</h2>
+        <div class="audit t-resize" id="auditBox">
+          <div class="audit-in" id="auditIn"></div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+</div>
+
+<script src="vendor/gsap.min.js"></script>
+<script src="js/motion.js"></script>
+<script src="js/sources.js"></script>
+<script src="js/gestures.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
