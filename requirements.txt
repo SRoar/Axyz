@@ -7,3 +7,5 @@ google-genai>=0.1.1
 pydantic>=2.6.0
 elevenlabs>=1.0.0
 python-dotenv>=1.0.1
+cv2_enumerate_cameras>=1.1
+pytest>=8.0

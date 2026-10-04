@@ -1,0 +1,14 @@
+{
+  "name": "Brio|Logitech",
+  "index": 1,
+  "backend": "auto",
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "fourcc": "MJPG",
+  "buffer_size": 1,
+  "exposure": "auto",
+  "gain": null,
+  "autofocus": null,
+  "source": "webcam"
+}
