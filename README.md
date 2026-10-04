@@ -1,7 +1,7 @@
 # Illumin / TactileReader
 
 A blind or low-vision student takes a **paper** free-response test with no scribe.
-A **pen probe** (Arduino 101: accelerometer + light sensor + 2 buzzers) and an **overhead camera** guide the pen to each answer box, keep the writing inside it, and a **voice** reads the questions and confirms the answer.
+A **pen probe** (Arduino UNO Q: MMA7660 accelerometer + 2 buzzers; no light sensor) and an **overhead camera** guide the pen to each answer box, keep the writing inside it, and a **voice** reads the questions and confirms the answer.
 
 > **The camera knows WHERE the pen is. The accelerometer knows WHAT the pen is doing. The brain acts on the combination.**
 

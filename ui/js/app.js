@@ -248,7 +248,6 @@
     el.imuSec.dataset.motion = m;
     M.iconSwap(el.imuIcon, m);
     M.textSwap(el.imuLabel, MOTION_LABEL[m] || m);
-    once("light", snap.imu.light, (v) => (el.lightVal.textContent = v));
     S.imuDirty = true;
   }
 
@@ -578,7 +577,7 @@
       ["steps", "#steps"], ["said", "#said"], ["page", "#page"], ["feedImg", "#feedImg"], ["feedCanvas", "#feedCanvas"], ["boxes", "#boxes"],
       ["trail", "#trail"], ["pen", "#pen"], ["lost", "#lost"], ["reach", "#reach"], ["camLabel", "#camLabel"], ["dock", "#dock"],
       ["dockText", "#dockText"], ["wave", "#wave"], ["imuSec", "#imuSec"], ["imuIcon", "#imuIcon"], ["imuLabel", "#imuLabel"], ["imuWave", "#imuWave"],
-      ["lightVal", "#lightVal"], ["taps", "#taps"], ["buzzSec", "#buzzSec"], ["lampL", "#lampL"], ["lampR", "#lampR"], ["buzzCmd", "#buzzCmd"],
+      ["taps", "#taps"], ["buzzSec", "#buzzSec"], ["lampL", "#lampL"], ["lampR", "#lampR"], ["buzzCmd", "#buzzCmd"],
       ["buzzLog", "#buzzLog"], ["guideSay", "#guideSay"], ["gDx", "#gDx"], ["gDy", "#gDy"], ["gState", "#gState"], ["auditBox", "#auditBox"],
       ["auditIn", "#auditIn"], ["health", "#health"], ["connBtn", "#connBtn"], ["connLabel", "#connLabel"], ["menu", "#connMenu"], ["menuNote", "#menuNote"],
     ].forEach(([k, s]) => (el[k] = $(s)));

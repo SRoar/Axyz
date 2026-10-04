@@ -25,19 +25,6 @@ TAP_MODE_ENV = "ILLUMIN_TAP_MODE"
 GUIDE_CMDS = (HapticCmd.GUIDE_LEFT, HapticCmd.GUIDE_RIGHT, HapticCmd.GUIDE_BOTH)
 
 
-# Voice commands disabled: pen taps drive the flow now.
-# def _voice_to_gestures(cmd: Optional[str]) -> List[Tap]:
-#     if not cmd:
-#         return []
-#     if any(k in cmd for k in ("read", "question", "repeat", "again", "start", "begin")):
-#         return [Tap.SINGLE]
-#     if any(k in cmd for k in ("skip", "next")):
-#         return [Tap.DOUBLE]
-#     if any(k in cmd for k in ("done", "finished", "submit")):
-#         return [Tap.TRIPLE]
-#     return []
-
-
 class StateMachine:
     MAX_AUDIT_RETRIES = 2
 
@@ -92,7 +79,7 @@ class StateMachine:
             self._last_cmd, self._last_cmd_t = cmd, now
 
     def _gestures(self, inp: Inputs) -> List[Tap]:
-        taps = [e.tap for e in inp.imu_events if e.tap != Tap.NONE]  # + _voice_to_gestures(inp.voice_cmd)
+        taps = [e.tap for e in inp.imu_events if e.tap != Tap.NONE]   # taps are the only commands (no voice input)
         if not taps or inp.t - self._last_gesture_t < TAP_DEBOUNCE_S:
             return []
         self._last_gesture_t = inp.t
@@ -223,8 +210,9 @@ class StateMachine:
         if self.tap_mode:
             return self._on_writing_tap_mode(inp, g, acts)
 
+        # The answer ends when the writing stops for ANSWER_IDLE_S, or early with tap 2 ("next question").
         done = (
-            Tap.DOUBLE in g or Tap.TRIPLE in g
+            Tap.DOUBLE in g
             or (self._nonwriting_since is not None and (now - self._nonwriting_since >= self.tm.ANSWER_IDLE_S))
         )
 
@@ -238,7 +226,7 @@ class StateMachine:
 
     def _on_writing_tap_mode(self, inp: Inputs, g: List[Tap], acts: List[Action]) -> None:
         now = inp.t
-        if Tap.DOUBLE in g or Tap.TRIPLE in g:
+        if Tap.DOUBLE in g:
             return self._skip(now, acts)
         if self._nonwriting_since is not None and now - self._nonwriting_since >= self.tm.ANSWER_IDLE_S:
             # Paused writing: back to NAVIGATING so tap 1 can repeat the question. Already in

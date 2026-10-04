@@ -364,8 +364,12 @@ def test_js_brain_port_follows_the_reference_brain():
     py_phases = [t for _, k, t in s.log if k == "PHASE"]
     js = _node("flow")
     js_phases = [e["text"] for e in js if e["kind"] == "PHASE"]
-    # Python demo has 2 questions, the JS demo 3 (the 3rd is skipped): same first two question cycles
-    assert js_phases[: len(py_phases) - 1] == py_phases[:-1]
+    # Both worlds answer q1 and q2 the same way; then Python answers q3 while the JS demo skips it
+    # with a double tap. Compare everything up to the start of q3 (the third IDLE).
+    def until_q3(phases):
+        idles = [i for i, p in enumerate(phases) if p == "IDLE"]
+        return phases[: idles[2] + 1]
+    assert until_q3(js_phases) == until_q3(py_phases)
     assert js_phases[-1] == "COMPLETE"
     spoken = [e["text"] for e in js if e["kind"] == "SPEAK"]
     assert "Skipping question." in spoken and spoken[-1].startswith("That was the last question")

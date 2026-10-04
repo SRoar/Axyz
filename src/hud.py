@@ -264,12 +264,12 @@ class Hud:
             k = 1.0 - (now - tap[0]) / TAP_FLASH_S
             cv2.rectangle(img, (tx, y + 40), (x + w - 12, y + 100), (int(40 + 50 * k), int(120 + 100 * k), int(220 * k + 20)), -1)
             put(img, f"TAP x{tap[1]}", (tx + 14, y + 83), 1.15, (15, 15, 15), 3)
-            hint = {1: "repeat", 2: "skip", 3: "done"}.get(tap[1], "")
+            hint = {1: "repeat", 2: "next"}.get(tap[1], "")
             put(img, hint, (tx + 14, y + 98), 0.5, (15, 15, 15), 1)
         else:
             cv2.rectangle(img, (tx, y + 40), (x + w - 12, y + 100), (52, 48, 46), 1)
-            put(img, "taps: 1 repeat", (tx + 10, y + 66), 0.52, DIM)
-            put(img, "2 skip   3 done", (tx + 10, y + 90), 0.52, DIM)
+            put(img, "taps: 1 read / repeat", (tx + 10, y + 66), 0.52, DIM)
+            put(img, "2 next question", (tx + 10, y + 90), 0.52, DIM)
         # waveform: ax, ay, az-1 (g), auto-scaled
         gx, gy, gw, gh = x + 12, y + 118, w - 24, 150
         cv2.rectangle(img, (gx, gy), (gx + gw, gy + gh), (26, 24, 23), -1)
@@ -284,7 +284,6 @@ class Hud:
             for ch, col in zip(range(3), (RED, GREEN, BLUE)):
                 ys = (gy + gh / 2 - np.clip(data[:, ch] / scale_g, -1, 1) * (gh / 2 - 4)).astype(np.int32)
                 cv2.polylines(img, [np.stack([xs, ys], 1).reshape(-1, 1, 2)], False, col, 1, cv2.LINE_AA)
-            put(img, f"light {samples[-1].light}", (x + w - 130, y + gh + 140), 0.5, GREY)
         else:
             put(img, "no IMU samples", (gx + 12, gy + 80), 0.6, DIM)
         put(img, f"+/-{scale_g:.2f} g   ax ay az", (gx + 6, gy + gh + 22), 0.5, GREY)

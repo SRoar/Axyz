@@ -23,7 +23,7 @@
 | 0:52 | Drift past the margin | "Harsh buzz — but only because the **IMU says WRITING**." | `OUT_OF_BOUNDS`, red WARN |
 | 1:00 | Correct back inside | "Stops the moment they're back." | back to `WRITING_LOCKED` |
 | 1:05 | Hand covers the pen | "The camera loses the pen under the hand — the IMU doesn't." | camera panel: **CAMERA LOST THE PEN / but the IMU still says: WRITING** |
-| 1:12 | **Triple tap** the pen | "Three taps: I'm done." | `AUDITING` |
+| 1:12 | Student stops writing and rests the pen | "Two seconds without writing — the pen knows the answer is finished." | `AUDITING` |
 | 1:18 | (auto) | "Gemini checks the photo of the box." | `LAST AUDIT: INK IN BOX` |
 | 1:22 | (auto) | "Answer recorded — ascending tone." | `COMPLETE` haptic, next question |
 | 1:30 | — | "**The pen knows what it's doing; the camera knows where it is.**" | IMU panel highlighted |

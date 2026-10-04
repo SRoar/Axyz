@@ -139,7 +139,7 @@ def main() -> None:
         worst = np.nanmin(accs_w)
         if worst < 0.75:
             print(f"\n  WARNING: MOVING vs WRITING falls to {worst:.2f} on a held-out run. A fixed threshold is fragile here:\n"
-                  f"  re-tune right before the demo with a fresh session, or use --no-writing (tap 3 = done, plan section 8).")
+                  f"  re-tune right before the demo with a fresh session, or use --no-writing (tap 2 = next question ends the answer, plan section 8).")
     else:
         print("\n(only one run of clips: record another session for a leave-one-run-out check)")
 

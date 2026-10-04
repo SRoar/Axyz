@@ -69,7 +69,9 @@ def to_writing(sm, t=0.0):
 
 def to_auditing(sm, t=0.0):
     t = to_writing(sm, t) + 1.0
-    sm.update(inp(t, motion=W, taps=[Tap.TRIPLE], guidance=IN_BOX))
+    sm.update(inp(t, motion=S, guidance=IN_BOX))                          # writing stops...
+    t += TIMING.ANSWER_IDLE_S + 0.05
+    sm.update(inp(t, motion=S, guidance=IN_BOX))                          # ...for ANSWER_IDLE_S
     assert sm.phase == Phase.AUDITING
     return t
 
@@ -300,12 +302,18 @@ def test_writing_resumes_reset_idle_timer():
     assert sm.phase == Phase.WRITING
 
 
-def test_writing_tap3_takes_snapshot():
+def test_writing_tap2_ends_the_answer_early():
+    # Tap 2 = "next question": while writing it ends the answer (audited) instead of waiting
+    # for the idle timeout. This is also how the EMIT_WRITING=false kill switch moves on.
     sm = brain()
     t = to_writing(sm)
-    acts = sm.update(inp(t + 1.0, motion=W, taps=[Tap.TRIPLE], guidance=IN_BOX))
+    acts = sm.update(inp(t + 1.0, motion=S, taps=[Tap.DOUBLE], guidance=IN_BOX))
     assert any(isinstance(a, Snapshot) for a in acts)
     assert sm.phase == Phase.AUDITING
+
+
+def test_there_is_no_third_tap():
+    assert 3 not in {t.value for t in Tap}
 
 
 # --------------------------------------------------------------------------- AUDITING
@@ -334,9 +342,10 @@ def test_audit_no_ink_retries_then_accepts():
         assert sm.phase == Phase.NAVIGATING
         t += 2.0
         sm.update(inp(t, motion=W, guidance=IN_BOX))
-        sm.update(inp(t + 1.0, motion=W, taps=[Tap.TRIPLE], guidance=IN_BOX))
+        sm.update(inp(t + 0.5, motion=S, guidance=IN_BOX))
+        t += 0.5 + TIMING.ANSWER_IDLE_S + 0.05
+        sm.update(inp(t, motion=S, guidance=IN_BOX))
         assert sm.phase == Phase.AUDITING
-        t += 1.0
     acts = sm.update(inp(t + 1.0, audit=AuditResult("q1", False)))
     assert spoken(acts) == [speech.ANSWER_RECORDED]
     assert sm.index == 1

@@ -144,7 +144,7 @@
     onWRITING(inp, q, g, acts) {
       const now = inp.t, gd = inp.guidance;
       if (inp.motion === W) this.nonwritingSince = null; else if (this.nonwritingSince == null) this.nonwritingSince = now;
-      const done = g.includes(3) || (this.nonwritingSince != null && now - this.nonwritingSince >= TM.ANSWER_IDLE_S);
+      const done = this.nonwritingSince != null && now - this.nonwritingSince >= TM.ANSWER_IDLE_S;
       if (done) { this.haptic("OFF", now, acts); acts.push({ type: "snapshot", question_id: q.id }); this.enter("AUDITING", now); return; }
       const status = gd ? gd.write_status : "UNKNOWN";
       if (inp.motion === W && status === "OUTSIDE") this.haptic("WARN", now, acts); else this.haptic("OFF", now, acts);
@@ -276,7 +276,7 @@
         guidance: { cmd: gd.cmd, speech: gd.speech, dx_cm: r(gd.dx_cm, 2), dy_cm: r(gd.dy_cm, 2), dist_cm: r(gd.dist_cm, 2), in_box: gd.in_box, write_status: gd.write_status, pen_visible: gd.pen_visible },
         haptic: { cmd: sys.haptic.cmd, seq: sys.hseq, age_s: r(Math.min(hAge, 999), 2), active },
         voice: { speaking: now < sys.voiceFreeAt, level: null, level_source: "synthetic", text: sys.voiceText },
-        imu: { samples: sys.samples.map((s) => s.map((v) => r(v))), light: c.motion === W ? 400 : 700 },
+        imu: { samples: sys.samples.map((s) => s.map((v) => r(v))) },
         taps: sys.tapsShown.filter((t) => now - t.t < 1.6).map((t) => ({ age_s: r(now - t.t), n: t.n })),
         audit: la ? { question_id: la.result.question_id, ink_present: la.result.ink_present, ink_outside: la.result.ink_outside, confidence: la.result.confidence, note: la.result.note, age_s: r(now - la.t, 2) } : null,
         events: sys.log.slice(),

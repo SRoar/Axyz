@@ -103,18 +103,38 @@ class FakeTracker:
         self.layout = layout or sample_layout()
         self.render = render
         self.clock = world.clock
+        self._ink: List[List[Tuple[float, float]]] = []   # strokes the pen left while the world says WRITING
+        self._writing = False
 
     def start(self) -> None: ...
     def stop(self) -> None: ...
 
     def read(self) -> Optional[TrackerReading]:
-        xy = self.world.pen_at(self.world.script_t())
+        ts = self.world.script_t()
+        xy = self.world.pen_at(ts)
         t = self.clock.now()
         pen = PenState(t, xy[0], xy[1], 0.0, 1.0) if xy else None
+        writing = xy is not None and self.world.motion_at(ts) == MotionState.WRITING
+        if writing:
+            if not self._writing:
+                self._ink.append([])
+            self._ink[-1].append(xy)
+        self._writing = writing
         return TrackerReading(t, pen, self._frame(pen) if self.render else None)
 
     def snapshot(self) -> Any:
-        return self._frame(None) if self.render else None
+        """Page-rectified image with the boxes and the ink written so far (always rendered: the
+        real auditor's pixel fallback needs it even when the HUD frames are off)."""
+        import cv2
+        h, w = 559, 432                          # US Letter at 20 px/cm
+        img = np.full((h, w, 3), 255, np.uint8)
+        for b in self.layout.values():
+            cv2.rectangle(img, (int(b.xmin * w), int(b.ymin * h)), (int(b.xmax * w), int(b.ymax * h)), (0, 0, 0), 3)
+        for stroke in self._ink:
+            if len(stroke) > 1:
+                pts = np.array([(x * w, y * h) for x, y in stroke], np.int32)
+                cv2.polylines(img, [pts], False, (40, 40, 40), 3)
+        return img
 
     def _frame(self, pen: Optional[PenState]) -> np.ndarray:
         h, w = 240, 320
@@ -176,7 +196,7 @@ class FakeImuLink:
             ax, ay, az = .05 * math.sin(t * 60) + g(0, .01), .05 * math.cos(t * 75) + g(0, .01), 1 + .03 * math.sin(t * 50)
         else:
             ax, ay, az = g(0, .05), g(0, .05), 1.8 + g(0, .1)
-        return ImuSample(t, ax, ay, az, 700 if m != W else 400)
+        return ImuSample(t, ax, ay, az)          # accelerometer only: the probe has no light sensor
 
     def send(self, cmd: HapticCmd) -> None:
         self.haptic_log.append((self.clock.now(), cmd))
@@ -188,11 +208,10 @@ class FakeImuLink:
 class FakeVoice:
     SECONDS_PER_CHAR = 0.045
 
-    def __init__(self, clock: Clock, scripted: Optional[List[Tuple[float, str]]] = None) -> None:
+    def __init__(self, clock: Clock) -> None:
         self.clock = clock
         self._free_at = 0.0
         self.log: List[Tuple[float, str]] = []
-        self._scripted = sorted(scripted or [])
 
     def speak(self, text: str, interrupt: bool = False) -> None:
         now = self.clock.now()
@@ -207,9 +226,7 @@ class FakeVoice:
         return self.clock.now() < self._free_at
 
     def poll_command(self) -> Optional[str]:
-        if self._scripted and self._scripted[0][0] <= self.clock.now():
-            return self._scripted.pop(0)[1]
-        return None
+        return None   # speaks only: there is no voice input
 
     def stop(self) -> None: ...
 
@@ -257,27 +274,15 @@ class FakeGuidanceEngine:
 
 
 # --------------------------------------------------------------------------- reference brain
-def _voice_to_gestures(cmd: Optional[str]) -> List[Tap]:
-    if not cmd:
-        return []
-    if any(k in cmd for k in ("repeat", "again")):
-        return [Tap.SINGLE]
-    if any(k in cmd for k in ("skip", "next")):
-        return [Tap.DOUBLE]
-    if any(k in cmd for k in ("done", "finished")):
-        return [Tap.TRIPLE]
-    return []
-
-
 class ReferenceStateMachine:
     """
     Happy-path reference of the transition table (see PLAN.md section 6, Dev 3).
     IMU motion state drives EVERY transition; the camera only supplies Guidance.
 
       IDLE ──(STILL>=HOVER_S | tap1)──► READING ──(speech finished)──► NAVIGATING
-      NAVIGATING ──(motion==WRITING)──► WRITING ──(not writing >= ANSWER_IDLE_S | tap3)──► AUDITING
+      NAVIGATING ──(motion==WRITING)──► WRITING ──(not writing >= ANSWER_IDLE_S)──► AUDITING
       AUDITING ──(ink ok)──► IDLE (next q) or COMPLETE      AUDITING ──(no ink)──► NAVIGATING
-      tap2 (or "skip") in IDLE/READING/NAVIGATING skips the question
+      tap2 in IDLE/READING/NAVIGATING skips the question (taps are the only commands: no voice input)
     """
 
     def __init__(self, questions: Optional[List[Question]] = None,
@@ -339,7 +344,7 @@ class ReferenceStateMachine:
                 self._still_since = now
         else:
             self._still_since = None
-        gestures = [e.tap for e in inp.imu_events if e.tap != Tap.NONE] + _voice_to_gestures(inp.voice_cmd)
+        gestures = [e.tap for e in inp.imu_events if e.tap != Tap.NONE]
         q = self.question
         if q is None or self.phase == Phase.COMPLETE:
             return acts
@@ -405,8 +410,8 @@ class ReferenceStateMachine:
             self._nonwriting_since = None
         elif self._nonwriting_since is None:
             self._nonwriting_since = now
-        done = Tap.TRIPLE in g or (self._nonwriting_since is not None
-                                   and now - self._nonwriting_since >= self.tm.ANSWER_IDLE_S)
+        done = (self._nonwriting_since is not None
+                and now - self._nonwriting_since >= self.tm.ANSWER_IDLE_S)
         if done:
             self._haptic(HapticCmd.OFF, now, acts)
             acts.append(Snapshot(q.id))

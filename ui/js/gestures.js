@@ -4,7 +4,7 @@
      G.set(kind)   continuous cue while the buzzers are sounding:
                    'left' | 'right' | 'both-down' | 'both-up' | 'warn' | null
      G.once(kind)  one-shot:  'lock' (two pulses) | 'done' (three rising bars, like 600/900/1200 Hz)
-     G.tap(n)      tap badge (1 repeat, 2 skip, 3 done)
+     G.tap(n)      tap badge (1 read / repeat, 2 next question; there is no third tap)
      G.follow(x,y) glide the layer to the pen (px inside .page)
 
    GSAP rules followed (gsap-skills): one timeline per cue (no chained delays), defaults on the timeline,
@@ -19,7 +19,7 @@
   let tl = null, current = null, onceTl = null, tapTimer = null, capTimer = null;
   let followX, followY, reduce = false;
 
-  const TAP_WORD = { 1: "repeat", 2: "skip", 3: "done" };
+  const TAP_WORD = { 1: "repeat", 2: "next" };
   const CAPTION = { lock: "Locked in", warn: "Out of bounds", done: "Answer recorded" };
 
   G.mount = function () {

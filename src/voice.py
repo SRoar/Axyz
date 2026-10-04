@@ -1,4 +1,8 @@
-"""VoiceEngine: streaming ElevenLabs TTS with macOS say fallback. (Background STT disabled.)"""
+"""VoiceEngine: streaming ElevenLabs TTS with macOS say fallback.
+
+Speaks only (PLAN.md 5.7): no microphone, no speech recognition. The student commands the
+system with pen taps, so poll_command() always returns None.
+"""
 
 import os
 import queue
@@ -6,8 +10,6 @@ import subprocess
 import tempfile
 import threading
 from typing import Dict, Optional, Tuple
-# Voice commands disabled: pen taps drive the flow now.
-# import speech_recognition as sr
 from src.config import config
 from src.contracts import Clock, RealClock
 
@@ -33,10 +35,7 @@ class VoiceEngine:
 
     def __init__(self, clock: Optional[Clock] = None):
         self.clock = clock or RealClock()
-        self.command_queue: "queue.Queue[str]" = queue.Queue()
         self.tts_queue: "queue.Queue[Tuple[int, str]]" = queue.Queue()
-        # self.recognizer = sr.Recognizer()
-        self.stop_listening = None
 
         self._running = True
         self._lock = threading.Lock()
@@ -57,28 +56,6 @@ class VoiceEngine:
             print("[VoiceEngine] ElevenLabs unavailable. Using macOS 'say' fallback.")
 
         self._start_tts_worker()
-        # self._start_stt_listener()
-
-    # def _start_stt_listener(self):
-    #     try:
-    #         mic = sr.Microphone()
-    #         with mic as source:
-    #             self.recognizer.adjust_for_ambient_noise(source, duration=0.8)
-    #
-    #         def audio_callback(recognizer, audio):
-    #             if self.is_speaking():
-    #                 return
-    #             try:
-    #                 text = recognizer.recognize_google(audio).lower()
-    #                 print(f"\n[VoiceEngine] Recognized speech: '{text}'")
-    #                 self.command_queue.put(text)
-    #             except (sr.UnknownValueError, sr.RequestError):
-    #                 pass
-    #
-    #         self.stop_listening = self.recognizer.listen_in_background(mic, audio_callback)
-    #         print("[VoiceEngine] Background microphone listener active.")
-    #     except Exception as e:
-    #         print(f"[VoiceEngine] Mic warning (voice commands disabled): {e}")
 
     def _cancelled(self, gen: int) -> bool:
         return gen != self._generation or not self._running
@@ -217,16 +194,8 @@ class VoiceEngine:
             return self._pending > 0
 
     def poll_command(self) -> Optional[str]:
-        try:
-            return self.command_queue.get_nowait()
-        except queue.Empty:
-            return None
+        return None   # no voice input
 
     def stop(self):
         self.silence()
         self._running = False
-        if self.stop_listening:
-            try:
-                self.stop_listening(wait_for_stop=False)
-            except Exception:
-                pass

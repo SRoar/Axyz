@@ -35,7 +35,7 @@ tests/test_web.py compares the two key-sets so they cannot drift)
                  active = buzzers sounding NOW (firmware rules: GUIDE_*/WARN die 1.5 s after the
                  last refresh, LOCK/COMPLETE are one-shots, OFF is silence)
     voice        {speaking, level, level_source, text}   level 0..1 or null; "real" | "synthetic"
-    imu          {samples: [[ax, ay, az], ...], light}
+    imu          {samples: [[ax, ay, az], ...]}   (accelerometer only)
     taps         [{age_s, n}]                  taps in the last 1.6 s
     audit        {question_id, ink_present, ink_outside, confidence, note, age_s} | null
     events       [{seq, t, kind, text}]        newest 40 log lines (PHASE SPEAK SILENCE HAPTIC
@@ -211,7 +211,7 @@ class Snapshotter:
                        "active": bool(active)},
             "voice": {"speaking": bool(inp.speaking) if inp else False, "level": level,
                       "level_source": level_source, "text": self._voice_text},
-            "imu": {"samples": samples, "light": samples_light(c.imu)},
+            "imu": {"samples": samples},
             "taps": [{"age_s": _r(now - t), "n": n} for t, n in self._taps if now - t < TAP_SHOW_S],
             "audit": audit,
             "events": list(self._events),
@@ -243,14 +243,6 @@ class Snapshotter:
             return [[_r(x.ax), _r(x.ay), _r(x.az)] for x in self.s.c.imu.recent_samples(IMU_SAMPLES)]
         except Exception:  # noqa: BLE001
             return []
-
-
-def samples_light(imu: Any) -> int:
-    try:
-        last = imu.recent_samples(1)
-        return int(last[-1].light) if last else 0
-    except Exception:  # noqa: BLE001
-        return 0
 
 
 def encode_frame(frame: Any, max_w: int = 960, quality: int = 80) -> Optional[bytes]:

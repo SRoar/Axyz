@@ -1,5 +1,5 @@
 """
-TactileReader / Illumin -- THE CONTRACT.  (CONTRACT_VERSION 1.1)
+TactileReader / Illumin -- THE CONTRACT.  (CONTRACT_VERSION 1.2)
 
 Every module talks to every other module ONLY through the types in this file.
 Nobody edits this file without telling Dev 4 (the contract owner) first.
@@ -8,7 +8,7 @@ If you change it, bump CONTRACT_VERSION and announce it in the team chat.
 Division of truth (this is the whole design):
     CAMERA  -> WHERE the pen is on the page                (PenState)
     IMU     -> WHAT the pen is doing (still/moving/writing/lifted) + tap commands
-    BRAIN   -> decides everything from those two + voice   (StateMachine)
+    BRAIN   -> decides everything from those two            (StateMachine; the voice only speaks)
 
 Coordinate space: PAGE-NORMALIZED.  (0,0) = top-left of the paper, (1,1) = bottom-right.
 x grows right, y grows DOWN (OpenCV convention).  The tracker converts camera pixels
@@ -41,7 +41,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union, runtime_checkable
 
-CONTRACT_VERSION = "1.1"
+CONTRACT_VERSION = "1.2"
 
 DEVICE_BAUD = 115200
 PAGE_W_CM = 21.59   # US Letter
@@ -60,7 +60,7 @@ class Tap(int, Enum):
     NONE = 0
     SINGLE = 1   # "read / repeat the question"
     DOUBLE = 2   # "next question" (skip)
-    TRIPLE = 3   # legacy: the firmware never sends it (kept so old code still parses)
+    # There is no third tap: a stray "T,3" line fails Tap(3) and parse_device_line drops it.
 
 
 class HapticCmd(str, Enum):
@@ -224,7 +224,7 @@ class Inputs:
     motion: MotionState                      # current IMU motion state (level, not edge)
     imu_events: Tuple[ImuEvent, ...] = ()    # edges since last tick (motion changes + taps)
     speaking: bool = False                   # voice.is_speaking()
-    voice_cmd: Optional[str] = None          # lowercased phrase from the mic, if any
+    voice_cmd: Optional[str] = None          # always None: there is no voice input (kept for compatibility)
     audit_result: Optional[AuditResult] = None
 
 
@@ -295,7 +295,7 @@ class Voice(Protocol):
     def speak(self, text: str, interrupt: bool = False) -> None: ...
     def silence(self) -> None: ...
     def is_speaking(self) -> bool: ...
-    def poll_command(self) -> Optional[str]: ...     # lowercased phrase or None
+    def poll_command(self) -> Optional[str]: ...     # always None: no voice input (taps are the commands)
     def stop(self) -> None: ...
 
 
