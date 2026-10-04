@@ -357,19 +357,21 @@ def main() -> int:
                 col = (0, 0, 255) if pen.confidence >= 0.99 else (0, 165, 255)
                 cv2.circle(page, (int(pen.x * pw), int(pen.y * ph)), 6, col, -1)
             lines = [
-                f"pen ({pen.x:.3f}, {pen.y:.3f}) conf {pen.confidence:.2f}" if pen else "pen: NOT SEEN",
+                f"pen ({pen.x:.3f}, {pen.y:.3f}) = ({pen.x * PAGE_W_CM:.1f}, {pen.y * PAGE_H_CM:.1f}) cm  "
+                f"conf {pen.confidence:.2f}" if pen else "pen: NOT SEEN",
                 f"box {box.id if box else '-'}  in_box={g.in_box}  {g.write_status.value}",
+                f"to box: right {g.dx_cm:+.1f} cm, down {g.dy_cm:+.1f} cm ({g.dist_cm:.1f} cm)",
                 f"{g.cmd.value if g.cmd else '-'}  {g.speech or ''}",
             ]
             for i, line in enumerate(lines):
-                cv2.putText(page, line, (6, ph - 50 + 18 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+                cv2.putText(page, line, (6, ph - 66 + 17 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
             cv2.imshow("tracker: page", page)
 
             if now - last_print >= 1.0:
                 last_print = now
                 warn = "  <-- below 25 FPS: run tools/camera_check.py --bench" if 0 < st["camera_fps"] < 25 else ""
                 print(f"cam {st['camera_fps']:5.1f} fps | trk {st['tracker_fps']:5.1f} fps | "
-                      f"{st['proc_ms']:4.1f} ms | {lines[0]} | {lines[2]}{warn}")
+                      f"{st['proc_ms']:4.1f} ms | {lines[0]} | {lines[2]} | {lines[3]}{warn}")
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
