@@ -18,8 +18,8 @@ CORNERS = np.float32([[400, 80], [880, 90], [900, 660], [380, 650]])   # slightl
 GREEN = {"h_lo": 50, "h_hi": 70, "s_lo": 120, "s_hi": 255, "v_lo": 80, "v_hi": 255, "min_area": 40}
 
 
-def page_image(marker_uv=None, extra_blob_px=None):
-    img = np.full((H, W, 3), 40, np.uint8)                       # dark desk
+def page_image(marker_uv=None, extra_blob_px=None, desk=(40, 40, 40)):
+    img = np.full((H, W, 3), desk, np.uint8)                     # dark desk by default
     cv2.fillConvexPoly(img, CORNERS.astype(np.int32), (235, 235, 235))   # white page
     calib = PageCalibration(CORNERS, (W, H))
     if marker_uv is not None:
@@ -30,7 +30,20 @@ def page_image(marker_uv=None, extra_blob_px=None):
     return img
 
 
-SKIN = (110, 150, 205)
+SKIN = (95, 115, 165)          # BGR; YCrCb ~ (128, 155, 110), like the real recordings
+PEN = (60, 32, 20)             # navy pen body
+WOOD = (67, 111, 154)          # the real wood desk: orange, passes the plain skin test
+
+
+def hand_with_pen(tip_px, back_px, palm_c, entry_px=(640, H + 40), base=None, shadow=False):
+    """A hand (palm + arm from the bottom edge) holding a pen from back_px to the writing end tip_px."""
+    img = page_image() if base is None else base.copy()
+    if shadow:          # grey shadow band hugging the left side of the arm + palm
+        cv2.line(img, (palm_c[0] - 85, palm_c[1]), (entry_px[0] - 85, H), (150, 150, 150), 22)
+    cv2.line(img, palm_c, entry_px, SKIN, 110)
+    cv2.ellipse(img, palm_c, (75, 90), 0, 0, 360, SKIN, -1)
+    cv2.line(img, tuple(back_px), tuple(tip_px), PEN, 18)
+    return img
 
 
 def hand_image(tip_px, entry_px=(640, H + 40), base=None):
@@ -140,24 +153,50 @@ def test_click_sampling_handles_red_hue_wrap():
 
 
 # --------------------------------------------------------------------------- marker-free tip
-def test_tip_detector_finds_the_pointed_end():
+def test_tip_detector_finds_the_fingertip_without_a_pen():
     det = TipDetector()
-    det.set_background(page_image())
     for tip in [(620, 300), (500, 200), (850, 450), (250, 350)]:      # last one is off the page
         d = det.detect(hand_image(tip))
-        assert d is not None, tip
-        assert abs(d.x - tip[0]) < 4 and abs(d.y - tip[1]) < 4, (tip, d)
+        assert d is not None and d.source == "finger", tip
+        assert abs(d.x - tip[0]) < 14 and abs(d.y - tip[1]) < 14, (tip, d)
         assert d.entry[1] > H - 10                                      # arm enters at the bottom
 
 
-def test_tip_detector_learns_background_only_once_the_view_is_still():
+@pytest.mark.parametrize("tip,back,palm", [
+    ((520, 300), (760, 420), (680, 470)),     # writing: tip forward-left, back end toward the right
+    ((600, 180), (690, 380), (680, 430)),     # pointing up the page
+    ((300, 390), (560, 400), (520, 480)),     # pen almost horizontal (tip just off the page)
+])
+def test_tip_detector_picks_the_pen_tip_not_the_hand(tip, back, palm):
+    for desk in [(40, 40, 40), WOOD]:
+        if desk == (40, 40, 40) and not (380 < tip[0] < 900):
+            continue        # a navy tip over a near-black desk is invisible without depth
+        img = hand_with_pen(tip, back, palm, entry_px=(palm[0], H + 40), base=page_image(desk=desk))
+        det = TipDetector()
+        d = det.detect(img)
+        assert d is not None and d.source == "pen", (desk, d)
+        assert np.hypot(d.x - tip[0], d.y - tip[1]) < 12, (desk, tip, d)
+        if desk == WOOD:
+            assert det.desk is not None             # the wood was recognised and kept out of the hand
+
+
+def test_tip_detector_ignores_the_hand_shadow_and_handles_left_hands():
+    tip, back, palm = (520, 300), (760, 420), (680, 470)
+    d = TipDetector().detect(hand_with_pen(tip, back, palm, entry_px=(palm[0], H + 40), shadow=True))
+    assert d.source == "pen" and np.hypot(d.x - tip[0], d.y - tip[1]) < 12, d
+    mirrored = cv2.flip(hand_with_pen(tip, back, palm, entry_px=(palm[0], H + 40)), 1)
+    d = TipDetector(right_handed=False).detect(mirrored)
+    assert d.source == "pen" and np.hypot(d.x - (W - 1 - tip[0]), d.y - tip[1]) < 12, d
+
+
+def test_tip_detector_works_before_a_background_and_learns_one_when_still():
     det = TipDetector()
-    for i in range(10):                                   # hand waving around: never learned
-        assert det.detect(hand_image((400 + 30 * i, 300)), i / 30) is None
+    for i in range(10):                                   # hand waving around: works on colour alone
+        assert det.detect(hand_image((400 + 30 * i, 300)), i / 30) is not None
     assert not det.has_background
     t = 10 / 30
     while not det.has_background:                         # empty and still for ~0.7 s
-        det.detect(page_image(), t)
+        assert det.detect(page_image(), t) is None
         t += 1 / 30
         assert t < 2.0
     assert det.detect(hand_image((640, 300)), t) is not None
@@ -175,13 +214,11 @@ def test_tip_detector_never_learns_a_black_frame_and_flags_camera_moves():
     assert det.detect(moved, 3.0) is None and det.scene_changed and not det.has_background
 
 
-def test_tip_detector_absorbs_a_blob_that_never_moves():
+def test_tip_detector_bad_background_leaves_no_ghost():
     det = TipDetector()
     det.set_background(hand_image((600, 250)))            # bad background: a hand was in it
-    ghost = page_image()                                  # hand gone -> ghost where it was
-    seen = [det.detect(ghost, i / 30) is not None for i in range(int(8 * 30))]
-    assert seen[0] and not seen[-1]                       # stuck at first, absorbed within ~6 s
-    assert det.detect(hand_image((500, 300)), 9.0) is not None   # a real hand still shows up
+    assert det.detect(page_image(), 0.0) is None          # hand gone: nothing skin-coloured, no ghost
+    assert det.detect(hand_image((500, 300)), 0.1) is not None   # a real hand still shows up
 
 
 def test_tip_detector_ignores_shadows_exposure_and_loose_blobs():
@@ -361,7 +398,7 @@ def test_pen_tracker_tracks_fingertip_on_and_off_the_page(tmp_path):
                 _push_and_wait(tr, cam, hand_image(tip), clock.t)
             p = tr.read().pen
             assert p is not None and abs(p.x - target[0]) < 0.02 and abs(p.y - target[1]) < 0.02, (target, p)
-            assert tr.last_detection().source == "tip"
+            assert tr.last_detection().source == "finger"
             assert page_side(p.x, p.y) == {0.40: None, -0.15: "left", 1.20: "right"}[target[0]]
     finally:
         tr.stop()

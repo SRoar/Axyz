@@ -9,10 +9,11 @@ What happens on start (no keys, no clicks):
      4 corners lock (saved to data/page_calibration.json) and that view of the empty scene
      becomes the background for tip detection. If the page can't be found within
      STARTUP_CALIB_S, the saved calibration is used.
-  2. TRACK: the pen tip (or the fingertip, when pointing) is found without any colour tuning:
-     src.hand_tip.TipDetector = the point of the hand/pen silhouette farthest from where the
-     arm enters the view. If a pen marker colour was tuned (tools/tune_marker.py ->
-     data/marker_hsv.json) and the marker is visible, it is used instead (more precise).
+  2. TRACK: src.hand_tip.TipDetector separates the pen from the hand (skin colour vs our pen's
+     colours from data/pen_profile.json, made once with tools/capture_pen.py), picks the writing
+     end (LiDAR depth when streaming from Record3D, else how the hand holds the pen) and follows
+     the line to the nib. No pen in hand -> the fingertip. If a pen marker colour was tuned
+     (tools/tune_marker.py -> data/marker_hsv.json) and the marker is visible, it is used instead.
   3. OFF THE PAGE: positions outside 0..1 are reported as-is (left of the page: x < 0, ...);
      guidance.page_side() names the side and the spoken cue says so.
 
@@ -42,6 +43,7 @@ from src.contracts import PAGE_H_CM, PAGE_W_CM, Clock, PenState, RealClock, Trac
 from src.hand_tip import TipDetector
 from src.marker import MARKER_PATH, MarkerDetector, load_marker_params
 from src.page_calibration import CALIB_PATH, PageCalibration, StablePageDetector
+from src.pen_profile import PROFILE_PATH, PenProfile
 from src.webcam import CameraConfig, Frame, load_camera_config, make_camera
 
 FRESH_S = 0.08          # a measurement younger than this is reported as-is
@@ -61,7 +63,7 @@ class TrackPoint:
     x: float                                   # full-frame pixels
     y: float
     area: float
-    source: str                                # "marker" | "tip"
+    source: str                                # "marker" | "pen" | "finger"
     entry: Optional[Tuple[float, float]] = None   # tip mode: where the arm enters the view
 
 
@@ -129,8 +131,10 @@ class PenTracker:
     def __init__(self, clock: Clock, camera_cfg: Optional[CameraConfig] = None,
                  calib_path: str = CALIB_PATH, marker_path: str = MARKER_PATH,
                  hud_frame: bool = True, camera: Any = None, auto_calibrate: bool = True,
-                 startup_calibrate: bool = True, detect_mode: str = "auto") -> None:
-        """detect_mode: "auto" (marker if tuned + visible, else tip) | "marker" | "tip"."""
+                 startup_calibrate: bool = True, detect_mode: str = "auto",
+                 profile_path: str = PROFILE_PATH, right_handed: bool = True) -> None:
+        """detect_mode: "auto" (marker if tuned + visible, else tip) | "marker" | "tip".
+        profile_path: our pen's colours (tools/capture_pen.py); without it a generic pen model is used."""
         self.clock = clock
         self.auto_calibrate = auto_calibrate
         self.detect_mode = detect_mode
@@ -141,7 +145,8 @@ class PenTracker:
         self.cam = camera
         self.detector = MarkerDetector(load_marker_params(marker_path))
         self._marker_tuned = os.path.exists(marker_path)
-        self.tip = TipDetector()
+        self.pen_profile = PenProfile.load(profile_path)
+        self.tip = TipDetector(right_handed=right_handed, profile=self.pen_profile)
         self._calib_file: Optional[PageCalibration] = PageCalibration.load(calib_path)
         self._calib: Optional[PageCalibration] = None
         self._calib_shape: Optional[Tuple[int, int]] = None
@@ -281,7 +286,7 @@ class PenTracker:
                 found = PageCalibration(corners, (w, h))
                 found.save(self.calib_path)
                 self._calib_file, self._calib, self._calib_shape = found, None, None
-                if self._last_det is None or self._last_det.source != "tip":
+                if self._last_det is None or self._last_det.source == "marker":
                     self.tip.set_background(img)   # whole page visible and no hand: the scene is empty
                 elif moved:
                     self.tip.reset()               # re-learn once the hand is out and the view is still
@@ -298,21 +303,22 @@ class PenTracker:
                   f"(view saved to {SEARCH_DEBUG_PATH}); it locks by itself whenever the page is "
                   "fully visible with hands out")
 
-    def _detect(self, img: np.ndarray, prev: Optional[Measurement], t: float, w: int) -> Optional[TrackPoint]:
+    def _detect(self, img: np.ndarray, prev: Optional[Measurement], t: float, w: int,
+                depth: Optional[np.ndarray] = None, confidence: Optional[np.ndarray] = None) -> Optional[TrackPoint]:
         if self.detect_mode == "marker" or (self.detect_mode == "auto" and self._marker_tuned):
             predict = (prev.px, prev.py) if prev is not None and t - prev.t <= HOLD_S else None
             m = self.detector.detect(img, predict, gate_px=0.15 * w)
             if m is not None:
                 return TrackPoint(m.x, m.y, m.area, "marker")
         if self.detect_mode in ("auto", "tip"):
-            d = self.tip.detect(img, t)
+            d = self.tip.detect(img, t, depth, confidence)
             if self.tip.scene_changed:
                 self.tip.scene_changed = False
                 if self.auto_calibrate and not self._searching:
                     print("[tracker] camera moved: finding the page again (keep the camera fixed)")
                     self.recalibrate()
             if d is not None:
-                return TrackPoint(d.x, d.y, d.area, "tip", d.entry)
+                return TrackPoint(d.x, d.y, d.area, d.source, d.entry)
         return None
 
     def _loop(self) -> None:
@@ -336,7 +342,7 @@ class PenTracker:
         calib = self._calibration_for(img.shape)
 
         prev = self._meas
-        det = self._detect(img, prev, f.t, w)
+        det = self._detect(img, prev, f.t, w, getattr(f, "depth", None), getattr(f, "confidence", None))
 
         meas = prev
         if det is not None:
@@ -391,6 +397,7 @@ def main() -> int:
                     help="auto = marker if tuned and visible, else pen tip / fingertip (no tuning)")
     ap.add_argument("--use-saved-calibration", action="store_true",
                     help="skip the startup page search and use data/page_calibration.json")
+    ap.add_argument("--left-handed", action="store_true", help="the writer holds the pen in the left hand")
     a = ap.parse_args()
 
     try:
@@ -400,7 +407,9 @@ def main() -> int:
     box_ids = list(layout)
     clock = RealClock()
     tracker = PenTracker(clock, config_from_args(a), detect_mode=a.mode,
-                         startup_calibrate=not a.use_saved_calibration)
+                         startup_calibrate=not a.use_saved_calibration, right_handed=not a.left_handed)
+    print(f"[tracker] pen model: {'our pen (' + PROFILE_PATH + ')' if tracker.pen_profile else 'generic'}"
+          " - capture yours with: python tools/capture_pen.py")
     tracker.start()
     guide = GuidanceEngine()
     box = layout[box_ids[0]] if box_ids else None
@@ -453,7 +462,9 @@ def main() -> int:
                             cv2.FONT_HERSHEY_SIMPLEX, fs * 1.6, (0, 0, 255), 3)
             cv2.imshow("tracker: camera", cam_view)
             if show_mask and tracker.tip.mask is not None:
-                cv2.imshow("tracker: foreground", tracker.tip.mask)
+                hand_m, pen_m = tracker.tip.mask, tracker.tip.pen_mask
+                view = cv2.merge([hand_m // 2, hand_m // 2 if pen_m is None else cv2.max(hand_m // 2, pen_m), hand_m // 2])
+                cv2.imshow("tracker: hand (grey) / pen (green)", view)
 
             page = reading.frame.copy() if reading.frame is not None else np.full((559, 432, 3), 255, np.uint8)
             ph, pw = page.shape[:2]

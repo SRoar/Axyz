@@ -215,6 +215,8 @@ class Frame:
     id: int
     t: float              # capture time from the camera's time_fn (the system Clock)
     image: np.ndarray     # BGR
+    depth: Optional[np.ndarray] = None        # Record3D LiDAR: float32 metres, lower res, aligned to image
+    confidence: Optional[np.ndarray] = None   # Record3D LiDAR confidence 0/1/2 (same size as depth)
 
 
 class _FrameSource:
@@ -228,11 +230,12 @@ class _FrameSource:
         self._stamps: Deque[float] = deque(maxlen=120)
         self._running = False
 
-    def _publish(self, image: np.ndarray) -> None:
+    def _publish(self, image: np.ndarray, depth: Optional[np.ndarray] = None,
+                 confidence: Optional[np.ndarray] = None) -> None:
         t = self.time_fn()
         with self._cond:
             fid = self._frame.id + 1 if self._frame else 1
-            self._frame = Frame(fid, t, image)
+            self._frame = Frame(fid, t, image, depth, confidence)
             self._stamps.append(time.perf_counter())
             self._cond.notify_all()
 
@@ -355,7 +358,8 @@ class Webcam(_FrameSource):
 
 
 class Record3DCamera(_FrameSource):
-    """iPhone/iPad over USB via the Record3D app (RGB only; ~60 FPS at 720x960 portrait).
+    """iPhone/iPad over USB via the Record3D app (~60 FPS at 720x960 portrait; with the LiDAR
+    camera each Frame also carries depth in metres, 192x256, aligned to the colour image).
 
     A watchdog reconnects whenever the stream stops or no frame arrives for STALL_S
     (phone screen locked, app backgrounded, cable bumped)."""
@@ -397,7 +401,21 @@ class Record3DCamera(_FrameSource):
         if stream is None or not self._running:
             return
         self._last_frame = time.perf_counter()
-        self._publish(cv2.cvtColor(np.asarray(stream.get_rgb_frame()), cv2.COLOR_RGB2BGR))
+        rgb = cv2.cvtColor(np.asarray(stream.get_rgb_frame()), cv2.COLOR_RGB2BGR)
+        depth = conf = None
+        try:
+            depth = np.array(stream.get_depth_frame(), dtype=np.float32)   # copy: the buffer is reused
+            conf = np.array(stream.get_confidence_frame(), dtype=np.uint8)
+            if depth.size == 0 or not np.isfinite(depth).any():
+                depth = conf = None
+            elif conf.shape != depth.shape:
+                conf = None
+            if depth is not None and stream.get_device_type() == 0:       # TrueDepth (front) is mirrored
+                rgb, depth = cv2.flip(rgb, 1), cv2.flip(depth, 1)
+                conf = None if conf is None else cv2.flip(conf, 1)
+        except Exception:
+            depth = conf = None
+        self._publish(rgb, depth, conf)
 
     def _connect(self) -> bool:
         from record3d import Record3DStream
