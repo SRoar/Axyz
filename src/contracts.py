@@ -364,6 +364,7 @@ def sample_questions() -> List[Question]:
     return [
         Question("q1", "Explain the first law of thermodynamics.", "box1"),
         Question("q2", "Describe how the second law of thermodynamics relates to entropy.", "box2"),
+        Question("q3", "State the formula for kinetic energy in terms of mass and velocity.", "box3"),
     ]
 
 

@@ -15,7 +15,7 @@ import threading
 import time
 
 from src import speech
-from src.contracts import Tap, load_questions
+from src.contracts import RealClock, Tap, load_questions
 from src.voice import VoiceEngine
 
 
@@ -63,7 +63,7 @@ def main() -> None:
         print("Keyboard mode: type 1 (single tap) or 2 (double tap), then Enter. Ctrl+C to quit.")
     else:
         from src.arduino_link import ArduinoImuLink
-        imu = ArduinoImuLink(port=a.port)
+        imu = ArduinoImuLink(RealClock(), port=a.port)
         imu.start()
         print("Tap the pen once to hear the question, twice for the next one. Ctrl+C to quit.")
 
