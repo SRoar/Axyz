@@ -138,8 +138,11 @@ class StablePageDetector:
     (phone stabilisation / focus), and single frames can miss: misses shorter than `max_gap_s`
     are ignored; a longer gap (hand over a corner, page moved away) restarts the countdown."""
 
-    def __init__(self, hold_s: float = 1.5, tol_px: float = 10.0, max_gap_s: float = 0.5) -> None:
-        self.hold_s, self.tol_px, self.max_gap_s = hold_s, tol_px, max_gap_s
+    def __init__(self, hold_s: float = 1.5, tol_px: Optional[float] = None, max_gap_s: float = 1.0,
+                 tol_frac: float = 0.02) -> None:
+        """tol_px: allowed corner wobble; default tol_frac x the larger frame side."""
+        self.hold_s, self.tol_px_fixed, self.max_gap_s, self.tol_frac = hold_s, tol_px, max_gap_s, tol_frac
+        self.tol_px = 10.0 if tol_px is None else tol_px
         self.reset()
 
     def reset(self) -> None:
@@ -151,6 +154,8 @@ class StablePageDetector:
 
     def update(self, frame: np.ndarray, t: float) -> float:
         """Feed one frame; returns progress 0..1 (1 = stable, `corners` is ready to use)."""
+        if self.tol_px_fixed is None:
+            self.tol_px = self.tol_frac * max(frame.shape[:2])
         found = detect_page_corners(frame)
         if found is None:
             if t - self._last_seen > self.max_gap_s:

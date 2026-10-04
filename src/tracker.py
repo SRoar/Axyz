@@ -152,6 +152,7 @@ class PenTracker:
         self._calib_shape: Optional[Tuple[int, int]] = None
         self._searching = auto_calibrate and (self._calib_file is None or startup_calibrate)
         self._search_t0: Optional[float] = None
+        self.page_locked_t: Optional[float] = None      # frame time of the last fresh page lock
         self._next_search_t = -1e9
         self._fx, self._fy = OneEuro(), OneEuro()
         self._lock = threading.Lock()
@@ -286,6 +287,7 @@ class PenTracker:
                 found = PageCalibration(corners, (w, h))
                 found.save(self.calib_path)
                 self._calib_file, self._calib, self._calib_shape = found, None, None
+                self.page_locked_t = f.t
                 if self._last_det is None or self._last_det.source == "marker":
                     self.tip.set_background(img)   # whole page visible and no hand: the scene is empty
                 elif moved:
@@ -386,7 +388,7 @@ def _sharpness(img: np.ndarray) -> float:
 # ---------------------------------------------------------------------- live view
 def main() -> int:
     from src.contracts import load_layout, sample_layout
-    from src.guidance import GuidanceEngine, page_side
+    from src.guidance import GuidanceEngine, box_offset_cm, direction_words, page_side
     from src.page_calibration import click_corners
     from src.webcam import add_camera_args, config_from_args
 
@@ -451,7 +453,10 @@ def main() -> int:
                     cv2.line(cam_view, (int(det.entry[0]), int(det.entry[1])), (int(det.x), int(det.y)), (255, 120, 0), 1)
                     cv2.circle(cam_view, (int(det.entry[0]), int(det.entry[1])), 8, (255, 120, 0), 2)
                 cv2.circle(cam_view, (int(det.x), int(det.y)), 10, (0, 0, 255), 2)
-                cv2.putText(cam_view, det.source, (int(det.x) + 12, int(det.y) - 12),
+                label = det.source
+                if pen is not None and calib is not None:
+                    label += f" ({pen.x * PAGE_W_CM:.1f}, {pen.y * PAGE_H_CM:.1f}) cm"
+                cv2.putText(cam_view, label, (int(det.x) + 12, int(det.y) - 12),
                             cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 255), 2)
             fps_col = (0, 255, 0) if st["camera_fps"] >= 25 else (0, 0, 255)
             cv2.putText(cam_view, f"camera {st['camera_fps']:.0f} fps  tracker {st['tracker_fps']:.0f} fps  "
@@ -479,25 +484,49 @@ def main() -> int:
                 trail.popleft()
             for (_, x0, y0), (_, x1, y1) in zip(trail, list(trail)[1:]):
                 cv2.line(page, (int(x0 * pw), int(y0 * ph)), (int(x1 * pw), int(y1 * ph)), (0, 200, 255), 2)
+            # pen tip -> every answer box: offset to the nearest point of the box, in cm
+            offsets = {b.id: box_offset_cm(pen.x, pen.y, b) for b in layout.values()} if pen is not None else {}
             if pen is not None:
                 col = (0, 0, 255) if pen.confidence >= 0.99 else (0, 165, 255)
                 px = int(min(pw - 6, max(5, pen.x * pw)))
                 py = int(min(ph - 6, max(5, pen.y * ph)))
+                if box is not None and box.id in offsets and offsets[box.id][2] > 0:
+                    dx, dy, dist = offsets[box.id]
+                    tx = int(round((pen.x + dx / PAGE_W_CM) * pw))
+                    ty = int(round((pen.y + dy / PAGE_H_CM) * ph))
+                    cv2.arrowedLine(page, (px, py), (tx, ty), (255, 120, 0), 2, tipLength=0.12)
+                    cv2.putText(page, f"{dist:.1f} cm", ((px + tx) // 2 + 6, (py + ty) // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 120, 0), 2)
                 if side:      # off the page: pin a ring to the nearest edge
                     cv2.circle(page, (px, py), 9, (0, 0, 255), 2)
                     cv2.putText(page, f"OFF PAGE: {side}", (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 else:
                     cv2.circle(page, (px, py), 6, col, -1)
-            lines = [
-                f"pen ({pen.x:.3f}, {pen.y:.3f}) = ({pen.x * PAGE_W_CM:.1f}, {pen.y * PAGE_H_CM:.1f}) cm  "
-                f"conf {pen.confidence:.2f}" if pen else "pen: NOT SEEN",
-                f"box {box.id if box else '-'}  in_box={g.in_box}  {g.write_status.value}",
-                f"to box: right {g.dx_cm:+.1f} cm, down {g.dy_cm:+.1f} cm ({g.dist_cm:.1f} cm)",
-                f"{g.cmd.value if g.cmd else '-'}  {g.speech or ''}",
-            ]
-            for i, line in enumerate(lines):
-                cv2.putText(page, line, (6, ph - 66 + 17 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
-            cv2.imshow("tracker: page", page)
+
+            if pen is not None:
+                tip_line = f"x {pen.x * PAGE_W_CM:5.1f} cm  y {pen.y * PAGE_H_CM:5.1f} cm"
+                tip_sub = f"({pen.x:.3f}, {pen.y:.3f}) of the page" + (f"  OFF PAGE: {side}" if side else "")
+            else:
+                tip_line, tip_sub = "not seen", ""
+            panel = np.full((ph, 360, 3), 255, np.uint8)
+            rows = [("PEN TIP on the paper (from top-left)", 0.5, (0, 0, 0), 1),
+                    (tip_line, 0.65, (0, 0, 255), 2), (tip_sub, 0.42, (80, 80, 80), 1), ("", 0.4, 0, 1),
+                    ("DISTANCE TO THE ANSWER BOXES", 0.5, (0, 0, 0), 1)]
+            for b in layout.values():
+                active = box is not None and b.id == box.id
+                if b.id not in offsets:
+                    text = f"{b.id}:  -"
+                else:
+                    dx, dy, dist = offsets[b.id]
+                    text = f"{b.id}:  INSIDE" if dist == 0 else f"{b.id}: {dist:4.1f} cm  {direction_words(dx, dy)}"
+                rows.append((("> " if active else "  ") + text, 0.45,
+                             (255, 120, 0) if active else (60, 60, 60), 2 if active else 1))
+            rows += [("", 0.4, 0, 1), ("1-9 = arrow to box N   0 = none", 0.42, (120, 120, 120), 1)]
+            y = 24
+            for text, scale, colr, thick in rows:
+                cv2.putText(panel, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, scale, colr, thick)
+                y += int(34 * scale) + 6
+            cv2.imshow("tracker: page", np.hstack([page, panel]))
 
             if now - last_print >= 1.0:
                 last_print = now
@@ -505,8 +534,11 @@ def main() -> int:
                 where = "SEARCHING FOR PAGE | " if searching else ""
                 src = f" [{det.source}]" if det is not None else ""
                 off = f" | OFF PAGE: {side}" if side else ""
-                print(f"{where}cam {st['camera_fps']:5.1f} fps | trk {st['tracker_fps']:5.1f} fps | "
-                      f"{st['proc_ms']:4.1f} ms | {lines[0]}{src}{off} | {lines[2]} | {lines[3]}{warn}")
+                dists = "  ".join(f"{bid} {'IN' if o[2] == 0 else f'{o[2]:.1f}cm'}" for bid, o in offsets.items())
+                to_box = ""
+                if box is not None and box.id in offsets:
+                    to_box = f" | to {box.id}: {direction_words(*offsets[box.id][:2])}"
+                print(f"{where}trk {st['tracker_fps']:4.0f} fps | tip {tip_line}{src}{off}{to_box} | {dists}{warn}")
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:

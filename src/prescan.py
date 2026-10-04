@@ -6,8 +6,9 @@ Prescan: find the answer box of every question on the blank test sheet -> data/l
     python -m src.prescan --image page.png        # use a saved page-rectified image instead of the camera
     python -m src.prescan --yes                   # skip the preview confirmation
 
-Needs data/page_calibration.json (python tools/calibrate_page.py) for the camera path: the image
-sent to Gemini is page-rectified, so its 0-1000 coordinates ARE page-normalized coordinates x 1000.
+Camera path: a live window shows the view until the sheet is found (all 4 corners visible, hands
+out, still); the photo is then page-rectified, so Gemini's 0-1000 coordinates ARE page-normalized
+coordinates x 1000. The new page position is saved to data/page_calibration.json for the tracker.
 Box ids come from data/questions.json (question N -> its box_id), else "box<N>".
 COMMIT data/layout.json so the demo never depends on the network.
 """
@@ -25,7 +26,9 @@ import numpy as np
 from src.contracts import Box, RealClock, load_layout, load_questions, save_layout
 
 PRESCAN_IMAGE = "data/prescan_page.png"
-GEMINI_MODEL = "gemini-2.5-flash"
+MIN_PAGE_BRIGHTNESS = 40.0
+GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_TRIES = 5
 PROMPT = (
     "This image is a photo of a paper test sheet, cropped and rectified so the image edges are the "
     "page edges. The sheet has numbered free-response questions, each followed by a large rectangular "
@@ -78,12 +81,21 @@ def gemini_boxes(image: np.ndarray, questions_path: str) -> Dict[str, Box]:
         raise RuntimeError("could not encode the page image")
     client = genai.Client(api_key=config.GEMINI_API_KEY)
     t0 = time.perf_counter()
-    resp = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[types.Part.from_bytes(data=jpg.tobytes(), mime_type="image/jpeg"), PROMPT],
-        config=types.GenerateContentConfig(response_mime_type="application/json",
-                                           response_schema=AnswerBoxes, temperature=0.0),
-    )
+    for attempt in range(GEMINI_TRIES):
+        try:
+            resp = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[types.Part.from_bytes(data=jpg.tobytes(), mime_type="image/jpeg"), PROMPT],
+                config=types.GenerateContentConfig(response_mime_type="application/json",
+                                                   response_schema=AnswerBoxes, temperature=0.0),
+            )
+            break
+        except Exception as e:      # 503 "high demand" spikes are short: back off and retry
+            if attempt == GEMINI_TRIES - 1 or "503" not in str(e) and "UNAVAILABLE" not in str(e):
+                raise
+            wait = 3.0 * 2 ** attempt
+            print(f"[prescan] Gemini busy, retrying in {wait:.0f}s ({attempt + 1}/{GEMINI_TRIES - 1})")
+            time.sleep(wait)
     found = sorted(AnswerBoxes.model_validate_json(resp.text).boxes, key=lambda b: b.question_number)
     print(f"[prescan] Gemini found {len(found)} boxes in {time.perf_counter() - t0:.1f}s")
     ids = box_ids_for(questions_path, max([b.question_number for b in found], default=0))
@@ -151,17 +163,61 @@ def capture_page(camera_args) -> np.ndarray:
     from src.tracker import PenTracker
     from src.webcam import config_from_args
 
-    if PageCalibration.load(CALIB_PATH) is None:
-        raise SystemExit(f"no {CALIB_PATH}: run `python tools/calibrate_page.py` first")
     tracker = PenTracker(RealClock(), config_from_args(camera_args), hud_frame=False)
     tracker.start()
+    snap = None
+    win = "prescan: frame the WHOLE sheet (all 4 corners), hands out   SPACE = take it now   ESC = cancel"
     try:
-        time.sleep(1.5)   # let exposure settle and fill the sharpness buffer
-        snap = tracker.snapshot()
+        # live view until the page locks FRESH in this session (never the old saved position:
+        # the photo for Gemini must be cropped to where the sheet is now)
+        locked_since = None
+        while True:
+            raw = tracker.raw_frame()
+            if raw is None:
+                if cv2.waitKey(30) & 0xFF == 27:
+                    break
+                continue
+            searching, progress, guess = tracker.calibration_status()
+            if not searching and tracker.page_locked_t is None:
+                tracker.recalibrate()          # startup search timed out: keep looking
+            view = raw.copy()
+            h, w = view.shape[:2]
+            fs = max(0.5, w / 1400.0)
+            locked = tracker.page_locked_t is not None
+            if locked:
+                cv2.polylines(view, [np.int32(tracker.calibration.page_polygon_px())], True, (0, 255, 0), 3)
+                msg, col = "PAGE FOUND - taking the photo", (0, 200, 0)
+            elif float(raw.mean()) < MIN_PAGE_BRIGHTNESS:
+                msg, col = "TOO DARK - lens covered? lights on?", (0, 0, 255)
+            elif guess is not None:
+                cv2.polylines(view, [np.int32(guess)], True, (0, 165, 255), 3)
+                cv2.rectangle(view, (10, h - 30), (10 + int(progress * (w - 20)), h - 18), (0, 255, 0), -1)
+                msg, col = "page seen - hold still, or SPACE if the outline is right", (0, 165, 255)
+            else:
+                msg, col = "NO PAGE - show the whole sheet, all 4 corners, desk around it", (0, 0, 255)
+            cv2.putText(view, msg, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, fs, col, 2)
+            scale = min(1.0, 900.0 / h)
+            cv2.imshow(win, cv2.resize(view, None, fx=scale, fy=scale) if scale < 1 else view)
+            key = cv2.waitKey(30) & 0xFF
+            if key == 27:
+                break
+            if key == ord(" ") and not locked and guess is not None:
+                calib = PageCalibration(np.float32(guess), (w, h))
+                calib.save(CALIB_PATH)
+                tracker.reload()
+                snap = calib.rectify(raw, PenTracker.SNAPSHOT_PX_PER_CM, cv2.INTER_CUBIC)
+                print(f"[prescan] took the photo with the outlined page (saved to {CALIB_PATH})")
+                break
+            if locked:
+                locked_since = locked_since or time.monotonic()
+                if time.monotonic() - locked_since >= 0.5:   # sharpness buffer holds the final view
+                    snap = tracker.snapshot()
+                    break
     finally:
         tracker.stop()
+        cv2.destroyAllWindows()
     if snap is None:
-        raise SystemExit("camera delivered no frames")
+        raise SystemExit("cancelled: no photo of the page")
     return snap
 
 

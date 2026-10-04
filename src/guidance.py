@@ -77,6 +77,25 @@ def _axis_delta(p: float, lo: float, hi: float) -> float:
     return 0.0
 
 
+def box_offset_cm(x: float, y: float, box: Box, page_w_cm: float = PAGE_W_CM,
+                  page_h_cm: float = PAGE_H_CM) -> tuple:
+    """(dx_cm, dy_cm, dist_cm) from the page-normalized point (x, y) to the nearest point of the
+    box (0, 0, 0 inside). dx > 0: the box is to the right; dy > 0: the box is below."""
+    dx = _axis_delta(x * page_w_cm, box.xmin * page_w_cm, box.xmax * page_w_cm)
+    dy = _axis_delta(y * page_h_cm, box.ymin * page_h_cm, box.ymax * page_h_cm)
+    return dx, dy, math.hypot(dx, dy)
+
+
+def direction_words(dx_cm: float, dy_cm: float, min_cm: float = 0.3) -> str:
+    """'down 3.1 cm, left 1.0 cm' (axes below min_cm are left out); 'inside' at 0."""
+    parts = []
+    if abs(dy_cm) >= min_cm:
+        parts.append(f"{'down' if dy_cm > 0 else 'up'} {abs(dy_cm):.1f} cm")
+    if abs(dx_cm) >= min_cm:
+        parts.append(f"{'right' if dx_cm > 0 else 'left'} {abs(dx_cm):.1f} cm")
+    return ", ".join(parts) or "inside"
+
+
 class GuidanceEngine:
     DEADZONE_CM = 1.0        # horizontal error below this -> GUIDE_BOTH (aligned, move vertically)
     AXIS_HYST_CM = 0.3

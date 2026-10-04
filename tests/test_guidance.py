@@ -1,7 +1,21 @@
 import pytest
 
 from src.contracts import PAGE_H_CM, PAGE_W_CM, Box, GuidanceEngine as GuidanceProtocol, HapticCmd, PenState, WriteStatus
-from src.guidance import IN_BOX_SPEECH, GuidanceEngine, phrase
+from src.guidance import IN_BOX_SPEECH, GuidanceEngine, box_offset_cm, direction_words, phrase
+
+
+def test_box_offset_and_direction_words():
+    box = Box("b", 0.5, 0.4, 0.8, 0.6)
+    assert box_offset_cm(0.6, 0.5, box) == (0.0, 0.0, 0.0)
+    assert direction_words(0.0, 0.0) == "inside"
+    dx, dy, dist = box_offset_cm(0.3, 0.2, box)              # up-left of the box
+    assert dx == pytest.approx(0.2 * PAGE_W_CM) and dy == pytest.approx(0.2 * PAGE_H_CM)
+    assert dist == pytest.approx((dx ** 2 + dy ** 2) ** 0.5)
+    assert direction_words(dx, dy) == f"down {dy:.1f} cm, right {dx:.1f} cm"
+    dx, dy, _ = box_offset_cm(0.9, 0.5, box)                 # right of the box, level with it
+    assert dy == 0.0 and dx == pytest.approx(-0.1 * PAGE_W_CM)
+    assert direction_words(dx, dy) == f"left {abs(dx):.1f} cm"
+    assert box_offset_cm(-0.2, 0.5, box)[0] == pytest.approx(0.7 * PAGE_W_CM)   # off the page
 
 BOX = Box("box1", 0.10, 0.25, 0.90, 0.45)     # same as sample_layout()
 

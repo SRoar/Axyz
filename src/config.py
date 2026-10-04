@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)   # the project's .env wins over stale keys in the shell environment
 
 
 @dataclass(frozen=True)

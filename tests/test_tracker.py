@@ -103,8 +103,9 @@ def test_stable_page_detector_waits_for_a_still_page():
     covered = img.copy()
     covered[:, :] = 40                                   # page gone (e.g. lifted away)
     assert det.update(covered, 1.7) == 1.0               # a brief miss is ignored
-    assert det.update(covered, 2.3) == 0.0 and det.corners is None   # a long gap resets
-    assert det.update(img, 2.4) == 0.0                   # countdown restarts
+    assert det.update(covered, 2.2) == 1.0               # still within max_gap_s (1 s)
+    assert det.update(covered, 2.8) == 0.0 and det.corners is None   # a long gap resets
+    assert det.update(img, 2.9) == 0.0                   # countdown restarts
     wobble = page_image()
     det2 = StablePageDetector(hold_s=1.0)
     det2.update(wobble, 0.0)
