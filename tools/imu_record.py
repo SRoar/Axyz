@@ -5,7 +5,7 @@
     python tools/imu_record.py --summarize                         # table of features per label
 
 Each recording is a CSV in data/imu/ named <LABEL>_<timestamp>.csv with columns
-    wall_s, ms, ax, ay, az, light, label
+    wall_s, ms, ax, ay, az, label
 Mount the probe on the pen BEFORE recording and do not move it afterwards: the classifier thresholds
 are only valid for that mounting.
 """
@@ -56,13 +56,12 @@ def beep(freq: int, ms: int) -> None:
 
 
 def parse_s(line: str):
-    """'S,<ms>,<ax>,<ay>,<az>,<light>' -> (ms, ax, ay, az, light) or None."""
+    """'S,<ms>,<ax>,<ay>,<az>' -> (ms, ax, ay, az) or None. (An old 6th light field is ignored.)"""
     p = line.strip().split(",")
     if len(p) < 5 or p[0] != "S":
         return None
     try:
-        light = int(float(p[5])) if len(p) > 5 else 0
-        return float(p[1]), float(p[2]), float(p[3]), float(p[4]), light
+        return float(p[1]), float(p[2]), float(p[3]), float(p[4])
     except ValueError:
         return None
 
@@ -86,29 +85,40 @@ def drain(ser, max_s: float = 120.0) -> None:
     print("  warning: could not catch up with the live stream; this clip may include old data")
 
 
-def record(ser, label: str, seconds: float, out_dir: str) -> str:
+def record(ser, label: str, seconds: float, out_dir: str, tag: str | None = None) -> str:
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    name = f"{label}_{tag}_" if tag else f"{label}_"  # e.g. MOVING_slow_20261004_...csv
+    path = os.path.join(out_dir, f"{name}{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    ser.write(b"PING\n")  # the board only streams while it keeps hearing from the PC (keepalive, ~1 per second)
     drain(ser)
     t0 = time.time()
+    last_ping = t0
     n = 0
     first_ms = None
     last_ms = None
-    with open(path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["wall_s", "ms", "ax", "ay", "az", "light", "label"])
-        while time.time() - t0 < seconds:
-            raw = ser.readline().decode("ascii", errors="ignore")
-            rec = parse_s(raw)
-            if rec is None:
-                continue
-            if last_ms is not None and rec[0] < last_ms:  # device rebooted mid-recording
-                print("  warning: device clock went backwards (board restarted?)")
-            if first_ms is None:
-                first_ms = rec[0]
-            last_ms = rec[0]
-            w.writerow([f"{time.time() - t0:.3f}", *rec, label])
-            n += 1
+    try:
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["wall_s", "ms", "ax", "ay", "az", "label"])
+            while time.time() - t0 < seconds:
+                if time.time() - last_ping >= 1.0:
+                    ser.write(b"PING\n")
+                    last_ping = time.time()
+                raw = ser.readline().decode("ascii", errors="ignore")
+                rec = parse_s(raw)
+                if rec is None:
+                    continue
+                if last_ms is not None and rec[0] < last_ms:  # device rebooted mid-recording
+                    print("  warning: device clock went backwards (board restarted?)")
+                if first_ms is None:
+                    first_ms = rec[0]
+                last_ms = rec[0]
+                w.writerow([f"{time.time() - t0:.3f}", *rec, label])
+                n += 1
+    except Exception:
+        if os.path.exists(path):
+            os.remove(path)  # never leave a half clip behind (the port can drop mid-read)
+        raise
     msg = f"  {label}: {n} samples in {seconds:.0f} s ({n / seconds:.1f} Hz) -> {path}"
     if first_ms is not None and last_ms is not None and last_ms > first_ms:
         ratio = (last_ms - first_ms) / 1000.0 / seconds  # device time / wall time, should be ~1.0
@@ -118,8 +128,45 @@ def record(ser, label: str, seconds: float, out_dir: str) -> str:
     return path
 
 
+def reopen(ser, wait_s: float = 90.0) -> None:
+    """Close and reopen the port after the board dropped off USB (it re-enumerates on its own)."""
+    try:
+        ser.close()
+    except Exception:
+        pass
+    t0 = time.time()
+    while time.time() - t0 < wait_s:
+        try:
+            ser.open()
+            time.sleep(1.0)
+            return
+        except Exception:
+            time.sleep(1.0)
+    raise SystemExit(f"The board did not come back within {wait_s:.0f} s - replug it and run again.")
+
+
+def record_with_retry(ser, label: str, seconds: float, out_dir: str, tag: str | None = None, tries: int = 3) -> str:
+    """record(), but if the port drops mid-clip, wait for the board, re-countdown, and redo the clip."""
+    import serial
+
+    for attempt in range(1, tries + 1):
+        try:
+            return record(ser, label, seconds, out_dir, tag)
+        except (serial.SerialException, OSError) as e:
+            print(f"  port dropped ({type(e).__name__}) during {label}; waiting for the board (try {attempt}/{tries})")
+            if attempt == tries:
+                raise
+            reopen(ser)
+            print(f"  board is back; redoing {label}: get ready")
+            for _ in range(3):
+                beep(700, 150)
+                time.sleep(0.85)
+            beep(1200, 500)
+    raise RuntimeError("unreachable")
+
+
 def features(rows):
-    """Cheap features that separate the four states. rows = list of (ms, ax, ay, az, light)."""
+    """Cheap features that separate the four states. rows = list of (ms, ax, ay, az)."""
     mags = [math.sqrt(r[1] ** 2 + r[2] ** 2 + r[3] ** 2) for r in rows]
     n = len(rows)
     mean_mag = sum(mags) / n
@@ -142,7 +189,7 @@ def summarize(out_dir: str) -> None:
     for fp in files:
         with open(fp) as f:
             rd = csv.DictReader(f)
-            rows = [(float(r["ms"]), float(r["ax"]), float(r["ay"]), float(r["az"]), int(float(r["light"]))) for r in rd]
+            rows = [(float(r["ms"]), float(r["ax"]), float(r["ay"]), float(r["az"])) for r in rd]
             label = os.path.basename(fp).split("_")[0]
         if len(rows) < 5:
             print(f"{os.path.basename(fp):34} {label:8} too few samples ({len(rows)})")
@@ -154,15 +201,25 @@ def summarize(out_dir: str) -> None:
         )
 
 
-def run_session(ser, seconds: float, out_dir: str, countdown: int) -> None:
+BASIC_PLAN = [(label, None, INSTRUCTIONS[label]) for label in LABELS]
+SPEEDS_PLAN = [
+    ("MOVING", "slow", "slide the pen across the page SLOWLY, feeling your way (a page width in ~5-6 s), no writing, no pauses, pen on the paper"),
+    ("MOVING", "normal", "slide the pen at a NORMAL relaxed speed (a page width in ~2-3 s), no writing, no pauses, pen on the paper"),
+    ("MOVING", "quick", "slide the pen QUICKLY and confidently (a page width in ~1 s), no writing, no pauses, pen on the paper"),
+    ("STILL", None, INSTRUCTIONS["STILL"]),
+    ("LIFTED", None, INSTRUCTIONS["LIFTED"]),
+]
+
+
+def run_session(ser, seconds: float, out_dir: str, countdown: int, plan=BASIC_PLAN) -> None:
     print("Guided session. Beeps: 3 short = get ready, 1 long = START, 2 short = STOP.\n")
-    for label in LABELS:
-        print(f"Next: {label} for {seconds:.0f} s - {INSTRUCTIONS[label]}")
+    for label, tag, text in plan:
+        print(f"Next: {label}{' (' + tag + ')' if tag else ''} for {seconds:.0f} s - {text}")
         for _ in range(countdown):
             beep(700, 150)
             time.sleep(0.85)
         beep(1200, 500)
-        record(ser, label, seconds, out_dir)
+        record_with_retry(ser, label, seconds, out_dir, tag)
         beep(500, 150)
         beep(500, 150)
         time.sleep(1.5)
@@ -175,6 +232,8 @@ def main() -> None:
     ap.add_argument("--label", choices=LABELS, help="record one labeled clip")
     ap.add_argument("--seconds", type=float, default=30.0, help="seconds per clip (default 30)")
     ap.add_argument("--session", action="store_true", help="guided recording of all four states with beeps")
+    ap.add_argument("--speeds", action="store_true", help="guided pass: MOVING slow/normal/quick, then STILL and LIFTED")
+    ap.add_argument("--tag", help="optional tag put in the file name of a single --label clip, e.g. slow")
     ap.add_argument("--countdown", type=int, default=3, help="beeps before each guided clip")
     ap.add_argument("--out", default=DEFAULT_OUT, help="output folder")
     ap.add_argument("--summarize", action="store_true", help="print per-file features and exit")
@@ -183,8 +242,8 @@ def main() -> None:
     if args.summarize:
         summarize(args.out)
         return
-    if not args.label and not args.session:
-        ap.error("pick --label, --session or --summarize")
+    if not args.label and not args.session and not args.speeds:
+        ap.error("pick --label, --session, --speeds or --summarize")
 
     import serial
 
@@ -192,7 +251,9 @@ def main() -> None:
     print(f"Using {port} @ {BAUD}")
     with serial.Serial(port, BAUD, timeout=1.0) as ser:
         time.sleep(0.5)
-        if args.session:
+        if args.speeds:
+            run_session(ser, args.seconds, args.out, args.countdown, SPEEDS_PLAN)
+        elif args.session:
             run_session(ser, args.seconds, args.out, args.countdown)
         else:
             print(f"{args.label} for {args.seconds:.0f} s - {INSTRUCTIONS[args.label]}")
@@ -200,7 +261,7 @@ def main() -> None:
                 beep(700, 150)
                 time.sleep(0.85)
             beep(1200, 500)
-            record(ser, args.label, args.seconds, args.out)
+            record_with_retry(ser, args.label, args.seconds, args.out, args.tag)
             beep(500, 150)
             beep(500, 150)
 
