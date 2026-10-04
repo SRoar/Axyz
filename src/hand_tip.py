@@ -57,12 +57,16 @@ DESK_EVERY = 15             # frames between desk colour updates
 PEN_MAX_WIDTH = 0.8
 PEN_MIN_LEN = 0.7
 PEN_MIN_ELONGATION = 2.5
+PEN_INWARD_FRAC = 0.3     # some of the pen must lie this far (x its length) from the frame border
 PEN_MERGE_DIST = 0.25       # other pieces whose pixels lie this close to the pen line join it
+PEN_EDGE_NEAR_HAND = 1.0    # a pen piece on the frame edge may be this far (x palm) from the hand
+PEN_AT_EDGE_PX = 3.0        # (work pixels) a pen end this close to the frame edge is cut off by it
 
 # deciding which end writes
 DEPTH_END_DIFF_M = 0.015    # ends differing this much in height: the lower one writes
 COLOUR_END_MARGIN = 8.0     # Lab distance margin for the profile's end colours to decide
 COLOUR_ENDS_DISTINCT = 20.0  # ... used only if the pen's two ends really differ in colour
+PEN_MEMORY_S = 0.5          # pen lost for less than this: no fingertip fallback (tracker holds the tip)
 NIB_MAX_FRAC = 0.12         # the nib may stick out past the pen-coloured body by this x length
 NIB_SIDE_FRAC = 0.06        # paper reference sampled this far (x length) beside the pen line
 NIB_DARKER = 0.80           # nib pixels are darker than this x the paper beside them
@@ -93,7 +97,7 @@ def _ellipse(d: int) -> np.ndarray:
 
 class TipDetector:
     def __init__(self, work_width: int = 360, diff_thresh: float = 40.0,
-                 min_area_frac: float = 0.004, adapt_rate: float = 0.03, right_handed: bool = True,
+                 min_area_frac: float = 0.015, adapt_rate: float = 0.03, right_handed: bool = True,
                  profile: Optional[PenProfile] = None) -> None:
         self.work_width = work_width
         self.right_handed = right_handed
@@ -103,6 +107,7 @@ class TipDetector:
         self.adapt_rate = adapt_rate
         self.table = TablePlane()
         self.desk: Optional[Tuple[float, float]] = None     # (Cr, Cb) of a skin-coloured desk
+        self._last_pen_t: Optional[float] = None
         self._bg: Optional[np.ndarray] = None       # float32, work size
         self._scale = 1.0
         self._n = 0
@@ -235,6 +240,7 @@ class TipDetector:
         det = None
         if hand is not None:
             det = self._locate(small, hand, hand_area, pen, core, height)
+            det = self._remember_pen(det, t)
 
         if self._bg is not None:
             keep = np.zeros((h, w), np.uint8) if hand is None else cv2.dilate(hand, self._k5, iterations=3)
@@ -260,6 +266,17 @@ class TipDetector:
         i, j = np.unravel_index(int(np.argmax(hist)), hist.shape)
         near = (np.abs(cr - (2 * i + 1)) <= DESK_CR_R) & (np.abs(cb - (2 * j + 1)) <= DESK_CB_R)
         return float(np.median(cr[near])), float(np.median(cb[near]))
+
+    def _remember_pen(self, det: TipDetection, t: float) -> Optional[TipDetection]:
+        """The pen drops out for a few frames (glare, fingers over it, motion blur). Falling back to
+        the fingertip then would jump to the middle of the pen: for PEN_MEMORY_S after a pen was
+        seen report nothing instead, so the tracker holds the last pen tip."""
+        if det.source == "pen":
+            self._last_pen_t = t
+            return det
+        if self._last_pen_t is not None and t - self._last_pen_t <= PEN_MEMORY_S:
+            return None
+        return det
 
     def _hand(self, skin: np.ndarray) -> Tuple[Optional[np.ndarray], int]:
         h, w = skin.shape
@@ -364,13 +381,22 @@ class TipDetector:
             return None
         max_w = max(3.0, PEN_MAX_WIDTH * palm)
         min_len = max(6.0, PEN_MIN_LEN * palm)
+        h, w = hand.shape
         near = cv2.dilate(hand, _ellipse(2 * int(max(2, 0.15 * palm)) + 1))
         n, labels, stats, cents = cv2.connectedComponentsWithStats(pen, connectivity=8)
         if n <= 1:
             return None
-        touching = np.unique(labels[(near > 0) & (pen > 0)])
-        best, best_len, best_pts = 0, 0.0, None
-        for k in touching:
+        touching = set(np.unique(labels[(near > 0) & (pen > 0)]).tolist())
+        # a pen poking in from the frame edge, held by a hand that is mostly out of view, need not
+        # touch the visible part of the hand: it only has to be close to it
+        on_edge = set(np.unique(np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])).tolist())
+        edge_only = on_edge - touching - {0}
+        if edge_only:
+            to_hand = cv2.distanceTransform(cv2.bitwise_not(hand), cv2.DIST_L2, 3)
+            edge_only = {k for k in edge_only
+                         if float(to_hand[labels == k].min()) <= PEN_EDGE_NEAR_HAND * palm}
+        best, best_len, best_pts, best_edge = 0, 0.0, None, False
+        for k in touching | edge_only:
             if k == 0 or stats[k, cv2.CC_STAT_AREA] < 0.5 * min_len:
                 continue
             bx, by, bw, bh = stats[k, :4]
@@ -378,7 +404,9 @@ class TipDetector:
             n_core = cv2.countNonZero(core[by:by + bh, bx:bx + bw] & piece.view(np.uint8) * np.uint8(255))
             if n_core < max(3, PEN_CORE_FRAC * stats[k, cv2.CC_STAT_AREA]):
                 continue
-            if height is not None:          # shadows / print are flat: some of the pen must stand up
+            # generic pen model only: shadows / print are flat, so some of the pen must stand up.
+            # (LiDAR is coarse: a thin pen held low reads as flat, so with our pen's colours this is skipped)
+            if height is not None and self.profile is None:
                 hp = height[by:by + bh, bx:bx + bw][piece]
                 known = np.isfinite(hp)
                 if known.sum() >= 0.5 * piece.sum() and np.count_nonzero(hp[known] > RAISED_M) < 0.1 * known.sum():
@@ -387,8 +415,12 @@ class TipDetector:
             pts = np.column_stack([px + bx, py + by]).astype(np.float32)
             (_, _), (rw, rh), _ = cv2.minAreaRect(pts)
             short, long_ = min(rw, rh), max(rw, rh)
+            # a sleeve / cable running along the frame edge: a real pen reaches into the view
+            inward = np.minimum(np.minimum(pts[:, 0], pts[:, 1]), np.minimum(w - 1 - pts[:, 0], h - 1 - pts[:, 1]))
+            if float(inward.max()) < PEN_INWARD_FRAC * long_:
+                continue
             if short <= max_w and long_ >= min_len and long_ >= PEN_MIN_ELONGATION * max(short, 1.0) and long_ > best_len:
-                best, best_len, best_pts = k, long_, pts
+                best, best_len, best_pts, best_edge = k, long_, pts, k in edge_only
         if not best:
             return None
 
@@ -415,6 +447,12 @@ class TipDetector:
         lo, hi = float(np.percentile(proj[on_line], 1)), float(np.percentile(proj[on_line], 99))
         a = (cx + lo * vx, cy + lo * vy)
         b = (cx + hi * vx, cy + hi * vy)
+
+        def edge_dist(p: Point) -> float:
+            return min(p[0], p[1], w - 1 - p[0], h - 1 - p[1])
+        ea, eb = edge_dist(a), edge_dist(b)
+        if max(ea, eb) <= PEN_AT_EDGE_PX:
+            return None                   # both ends cut off by the frame: no visible tip
 
         mask = np.zeros_like(pen)
         mask[pts[:, 1].astype(int), pts[:, 0].astype(int)] = 255
@@ -446,7 +484,10 @@ class TipDetector:
                 diff = self.profile.tip_likeness(ends[0]) - self.profile.tip_likeness(ends[1])
                 if abs(diff) >= COLOUR_END_MARGIN:
                     return (a, b, "colour") if diff > 0 else (b, a, "colour")
-        # c. how a hand holds a pen: forward along the arm and toward the thumb side
+        # c. a pen cut off by the frame edge: its back end is the one at (or beyond) the edge
+        if best_edge or (min(ea, eb) <= PEN_AT_EDGE_PX and max(ea, eb) > 0.15 * length):
+            return (a, b, "edge") if ea > eb else (b, a, "edge")
+        # d. how a hand holds a pen: forward along the arm and toward the thumb side
         ux, uy = finger[0] - entry[0], finger[1] - entry[1]
         norm = max(1e-6, float(np.hypot(ux, uy)))
         ux, uy = ux / norm, uy / norm
