@@ -1,7 +1,7 @@
 import pytest
 
 from src.contracts import PAGE_H_CM, PAGE_W_CM, Box, GuidanceEngine as GuidanceProtocol, HapticCmd, PenState, WriteStatus
-from src.guidance import IN_BOX_SPEECH, GuidanceEngine, box_offset_cm, direction_words, phrase
+from src.guidance import IN_BOX_SPEECH, GuidanceEngine, box_offset_cm, box_status, direction_words, phrase
 
 
 def test_box_offset_and_direction_words():
@@ -16,6 +16,18 @@ def test_box_offset_and_direction_words():
     assert dy == 0.0 and dx == pytest.approx(-0.1 * PAGE_W_CM)
     assert direction_words(dx, dy) == f"left {abs(dx):.1f} cm"
     assert box_offset_cm(-0.2, 0.5, box)[0] == pytest.approx(0.7 * PAGE_W_CM)   # off the page
+
+
+def test_box_status_says_in_the_box_or_how_far_away():
+    b1, b2 = Box("box1", 0.1, 0.1, 0.4, 0.3), Box("box2", 0.1, 0.5, 0.4, 0.7)
+    offs = lambda x, y: {b.id: box_offset_cm(x, y, b) for b in (b1, b2)}
+    assert box_status(None, b1, {}) == "pen not seen"
+    assert box_status("box1", b1, offs(0.2, 0.2)) == "IN box1"
+    assert box_status("box1", None, offs(0.2, 0.2)) == "IN box1"
+    away = box_status(None, b2, offs(0.2, 0.2))
+    assert away.startswith("box2: ") and "cm away (down" in away and "[now in" not in away
+    assert box_status("box1", b2, offs(0.2, 0.2)).endswith("[now in box1]")
+    assert box_status(None, None, offs(0.2, 0.42)).startswith("box2:")      # nearest box without a target
 
 BOX = Box("box1", 0.10, 0.25, 0.90, 0.45)     # same as sample_layout()
 

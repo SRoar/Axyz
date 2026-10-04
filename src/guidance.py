@@ -96,6 +96,20 @@ def direction_words(dx_cm: float, dy_cm: float, min_cm: float = 0.3) -> str:
     return ", ".join(parts) or "inside"
 
 
+def box_status(inside_id: Optional[str], target: Optional[Box], offsets: dict) -> str:
+    """One line for the display. offsets: box id -> box_offset_cm(...) for the current pen tip.
+    'IN box2' when the tip is in the target box (or in any box when there is no target), else
+    'box2: 4.2 cm away (down 3.1 cm, right 2.8 cm)' for the target (nearest box without one)."""
+    if not offsets:
+        return "pen not seen"
+    if inside_id is not None and (target is None or target.id == inside_id):
+        return f"IN {inside_id}"
+    tid = target.id if target is not None and target.id in offsets else min(offsets, key=lambda k: offsets[k][2])
+    dx, dy, dist = offsets[tid]
+    text = f"{tid}: {dist:.1f} cm away ({direction_words(dx, dy)})"
+    return text + (f"  [now in {inside_id}]" if inside_id is not None else "")
+
+
 class GuidanceEngine:
     DEADZONE_CM = 1.0        # horizontal error below this -> GUIDE_BOTH (aligned, move vertically)
     AXIS_HYST_CM = 0.3

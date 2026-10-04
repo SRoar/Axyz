@@ -388,7 +388,7 @@ def _sharpness(img: np.ndarray) -> float:
 # ---------------------------------------------------------------------- live view
 def main() -> int:
     from src.contracts import load_layout, sample_layout
-    from src.guidance import GuidanceEngine, box_offset_cm, direction_words, page_side
+    from src.guidance import GuidanceEngine, box_offset_cm, box_status, page_side
     from src.page_calibration import click_corners
     from src.webcam import add_camera_args, config_from_args
 
@@ -508,19 +508,23 @@ def main() -> int:
                 tip_sub = f"({pen.x:.3f}, {pen.y:.3f}) of the page" + (f"  OFF PAGE: {side}" if side else "")
             else:
                 tip_line, tip_sub = "not seen", ""
+            inside = next((bid for bid, o in offsets.items() if o[2] == 0), None)
+            status = box_status(inside, box, offsets)
             panel = np.full((ph, 360, 3), 255, np.uint8)
             rows = [("PEN TIP on the paper (from top-left)", 0.5, (0, 0, 0), 1),
                     (tip_line, 0.65, (0, 0, 255), 2), (tip_sub, 0.42, (80, 80, 80), 1), ("", 0.4, 0, 1),
-                    ("DISTANCE TO THE ANSWER BOXES", 0.5, (0, 0, 0), 1)]
+                    (status, 0.55, (0, 160, 0) if inside else (255, 120, 0), 2), ("", 0.4, 0, 1),
+                    ("all boxes:", 0.45, (0, 0, 0), 1)]
             for b in layout.values():
                 active = box is not None and b.id == box.id
                 if b.id not in offsets:
                     text = f"{b.id}:  -"
                 else:
                     dx, dy, dist = offsets[b.id]
-                    text = f"{b.id}:  INSIDE" if dist == 0 else f"{b.id}: {dist:4.1f} cm  {direction_words(dx, dy)}"
+                    text = f"{b.id}:  IN THE BOX" if dist == 0 else f"{b.id}: {dist:4.1f} cm away"
                 rows.append((("> " if active else "  ") + text, 0.45,
-                             (255, 120, 0) if active else (60, 60, 60), 2 if active else 1))
+                             (0, 160, 0) if b.id == inside else (255, 120, 0) if active else (60, 60, 60),
+                             2 if active or b.id == inside else 1))
             rows += [("", 0.4, 0, 1), ("1-9 = arrow to box N   0 = none", 0.42, (120, 120, 120), 1)]
             y = 24
             for text, scale, colr, thick in rows:
@@ -534,11 +538,7 @@ def main() -> int:
                 where = "SEARCHING FOR PAGE | " if searching else ""
                 src = f" [{det.source}]" if det is not None else ""
                 off = f" | OFF PAGE: {side}" if side else ""
-                dists = "  ".join(f"{bid} {'IN' if o[2] == 0 else f'{o[2]:.1f}cm'}" for bid, o in offsets.items())
-                to_box = ""
-                if box is not None and box.id in offsets:
-                    to_box = f" | to {box.id}: {direction_words(*offsets[box.id][:2])}"
-                print(f"{where}trk {st['tracker_fps']:4.0f} fps | tip {tip_line}{src}{off}{to_box} | {dists}{warn}")
+                print(f"{where}trk {st['tracker_fps']:4.0f} fps | tip {tip_line}{src}{off} | {status}{warn}")
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
