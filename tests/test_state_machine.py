@@ -136,11 +136,21 @@ def test_skip_from_navigating_turns_buzzers_off():
 
 
 def test_skip_last_question_completes_with_summary():
+    """Tap 2 always counts as answered (not skipped), even with no writing - see test_skip_counts_as_answered."""
     sm = brain()
     for i in range(3):
         sm.update(inp(i * 1.0, motion=M, taps=[Tap.DOUBLE]))
     assert sm.phase == Phase.COMPLETE
-    assert sm.skipped == 3
+    assert sm.answered == 3 and sm.skipped == 0
+
+
+def test_skip_counts_as_answered_in_tap_mode_too():
+    """Same guarantee in tap_mode, where the old rule additionally required self._wrote."""
+    sm = tap_brain()
+    for i in range(len(QUESTIONS)):
+        sm.update(inp(i * 1.0, motion=M, taps=[Tap.DOUBLE]))
+    assert sm.phase == Phase.COMPLETE
+    assert sm.answered == len(QUESTIONS) and sm.skipped == 0
 
 
 # --------------------------------------------------------------------------- READING
@@ -397,12 +407,13 @@ def test_writing_seen_in_reading_is_handled_after_speech():
 
 
 def test_complete_summary_and_no_actions_after():
+    """1 real audited answer + 2 double-tapped questions - tap 2 always counts as answered now."""
     sm = brain()
     t = to_auditing(sm)
     sm.update(inp(t + 1.0, audit=AuditResult("q1", True)))
     sm.update(inp(t + 2.0, motion=M, taps=[Tap.DOUBLE]))
     acts = sm.update(inp(t + 3.0, motion=M, taps=[Tap.DOUBLE]))
-    assert spoken(acts) == [speech.test_complete(1, 2)]
+    assert spoken(acts) == [speech.test_complete(3, 0)]
     assert sm.phase == Phase.COMPLETE
     assert sm.update(inp(t + 4.0, motion=M, taps=[Tap.SINGLE])) == []
 
@@ -492,10 +503,11 @@ def test_tap_mode_full_flow():
     assert spoken(acts) == [speech.test_complete(3, 0)]
 
 
-def test_tap_mode_counts_unanswered_as_skipped():
+def test_tap_mode_counts_unanswered_as_answered():
+    """Tap 2 always counts as answered now, even with no writing at all (was 'skipped')."""
     sm = tap_brain()
     t = to_writing(sm)
     sm.update(inp(t + 1.0, motion=S, taps=[Tap.DOUBLE]))
     sm.update(inp(t + 2.0, taps=[Tap.DOUBLE]))
     acts = sm.update(inp(t + 3.0, taps=[Tap.DOUBLE]))
-    assert spoken(acts) == [speech.test_complete(1, 2)]
+    assert spoken(acts) == [speech.test_complete(3, 0)]

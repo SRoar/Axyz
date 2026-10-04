@@ -90,10 +90,10 @@ class StateMachine:
         self._enter(Phase.READING, now)
 
     def _skip(self, now: float, acts: List[Action]) -> None:
-        if self.tap_mode and self._wrote:
-            self.answered += 1
-        else:
-            self.skipped += 1
+        # Tap 2 (double-tap / 't' / 'n') always counts the question as answered, regardless of
+        # whether writing was actually detected - the operator's deliberate "next question" gesture
+        # is taken as confirmation, not a skip.
+        self.answered += 1
         if self.index + 1 < len(self.questions):
             acts.append(Speak(speech.moving_to_question(self.index + 2), interrupt=True))
         self._haptic(HapticCmd.OFF, now, acts)
