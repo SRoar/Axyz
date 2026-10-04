@@ -51,6 +51,9 @@ ROI_MARGIN = 0.30       # marker search: this far (page units) outside the calib
 MAX_OFF_PAGE = 1.0      # positions further off the page than this are nonsense (bad homography)
 STARTUP_CALIB_S = 15.0  # look for the page this long on start before falling back to the saved file
 SEARCH_DEBUG_PATH = "data/page_search_failed.png"
+SEARCH_EVERY_S = 0.05   # page-finding rate while searching
+WATCH_EVERY_S = 0.15    # ... and afterwards, while watching for a moved page
+RELOCK_PX = 8.0         # a page seen this far from the calibrated corners is re-locked
 
 
 @dataclass
@@ -144,6 +147,7 @@ class PenTracker:
         self._calib_shape: Optional[Tuple[int, int]] = None
         self._searching = auto_calibrate and (self._calib_file is None or startup_calibrate)
         self._search_t0: Optional[float] = None
+        self._next_search_t = -1e9
         self._fx, self._fy = OneEuro(), OneEuro()
         self._lock = threading.Lock()
         self._meas: Optional[Measurement] = None
@@ -220,6 +224,7 @@ class PenTracker:
         """Hands-free re-calibration: look for the page again (hands out of view, hold still)."""
         self._page_auto.reset()
         self._search_t0 = None
+        self._next_search_t = -1e9
         self._searching = True
 
     def reset_background(self) -> None:
@@ -260,25 +265,38 @@ class PenTracker:
         return self._calib
 
     def _search_page(self, img: np.ndarray, f: Frame) -> None:
+        """Startup: look for the page until it locks. Afterwards keep watching at a low rate and
+        re-lock if the page is seen, uncovered and still, somewhere else (page or camera moved)."""
         if self._search_t0 is None:
             self._search_t0 = f.t
-        if f.id % 3 == 0 and self._page_auto.update(img, f.t) >= 1.0:
-            h, w = img.shape[:2]
-            found = PageCalibration(self._page_auto.corners, (w, h))
-            found.save(self.calib_path)
-            self._calib_file, self._calib, self._calib_shape = found, None, None
-            if self._last_det is None or self._last_det.source != "tip":
-                self.tip.set_background(img)   # whole page visible and no hand: the scene is empty
+        if f.t < self._next_search_t:
+            return
+        self._next_search_t = f.t + (SEARCH_EVERY_S if self._searching else WATCH_EVERY_S)
+        h, w = img.shape[:2]
+        if self._page_auto.update(img, f.t) >= 1.0:
+            corners = self._page_auto.corners
+            old = self._calib_file
+            moved = old is None or old.image_size != (w, h) or np.abs(corners - old.corners_px).max() > RELOCK_PX
+            if self._searching or moved:
+                found = PageCalibration(corners, (w, h))
+                found.save(self.calib_path)
+                self._calib_file, self._calib, self._calib_shape = found, None, None
+                if self._last_det is None or self._last_det.source != "tip":
+                    self.tip.set_background(img)   # whole page visible and no hand: the scene is empty
+                elif moved:
+                    self.tip.reset()               # re-learn once the hand is out and the view is still
+                print(f"[tracker] page {'locked' if self._searching else 'moved: re-locked'} "
+                      f"automatically -> {self.calib_path}; tracking the pen")
             self._searching = False
-            print(f"[tracker] page locked automatically -> {self.calib_path}; tracking the pen")
-        elif self._calib_file is not None and f.t - self._search_t0 > STARTUP_CALIB_S:
+        elif self._searching and self._calib_file is not None and f.t - self._search_t0 > STARTUP_CALIB_S:
             self._searching = False
             try:
                 cv2.imwrite(SEARCH_DEBUG_PATH, img)
             except cv2.error:
                 pass
             print(f"[tracker] page not found in {STARTUP_CALIB_S:.0f}s: using the saved calibration "
-                  f"(view saved to {SEARCH_DEBUG_PATH}; press c to look again)")
+                  f"(view saved to {SEARCH_DEBUG_PATH}); it locks by itself whenever the page is "
+                  "fully visible with hands out")
 
     def _detect(self, img: np.ndarray, prev: Optional[Measurement], t: float, w: int) -> Optional[TrackPoint]:
         if self.detect_mode == "marker" or (self.detect_mode == "auto" and self._marker_tuned):
@@ -288,6 +306,11 @@ class PenTracker:
                 return TrackPoint(m.x, m.y, m.area, "marker")
         if self.detect_mode in ("auto", "tip"):
             d = self.tip.detect(img, t)
+            if self.tip.scene_changed:
+                self.tip.scene_changed = False
+                if self.auto_calibrate and not self._searching:
+                    print("[tracker] camera moved: finding the page again (keep the camera fixed)")
+                    self.recalibrate()
             if d is not None:
                 return TrackPoint(d.x, d.y, d.area, "tip", d.entry)
         return None
@@ -308,7 +331,7 @@ class PenTracker:
         t0 = time.perf_counter()
         img = f.image
         h, w = img.shape[:2]
-        if self._searching:
+        if self.auto_calibrate:
             self._search_page(img, f)
         calib = self._calibration_for(img.shape)
 

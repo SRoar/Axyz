@@ -16,6 +16,8 @@ Robustness:
     background within a few seconds; the rest of the background adapts slowly
   * a border blob that doesn't move at all for STATIC_S (a "ghost" left by a bad background, a
     bag strap, ...) is absorbed too, so the tip can't get stuck on it
+  * the camera must be FIXED (overhead mount). If it moves, most of the view changes at once:
+    that is reported as a scene change (no tip), and the background is re-learned once still
 """
 from __future__ import annotations
 
@@ -30,6 +32,8 @@ STILL_DIFF = 4.0       # mean frame-to-frame change (0..255) that still counts a
 STATIC_S = 6.0         # a blob whose tip + size don't change for this long is scenery
 STATIC_TIP_PX = 2.5    # (work-size pixels)
 STATIC_AREA = 0.05
+MIN_BRIGHTNESS = 25.0  # never learn a background from a (near) black frame: stream not started
+SCENE_CHANGE_FRAC = 0.35   # this much of the view "foreground" = the camera moved, not a hand
 
 
 @dataclass
@@ -54,6 +58,7 @@ class TipDetector:
         self._prev: Optional[np.ndarray] = None
         self._still_since: Optional[float] = None
         self._static: Optional[Tuple[float, float, float, float]] = None   # tip x, y, area, since
+        self.scene_changed = False                  # set when the camera moved; the caller clears it
         self.mask: Optional[np.ndarray] = None      # last foreground mask (work size), for display
         self._k3 = np.ones((3, 3), np.uint8)
         self._k5 = np.ones((5, 5), np.uint8)
@@ -81,7 +86,8 @@ class TipDetector:
 
     def _learn_when_still(self, small: np.ndarray, t: float) -> None:
         prev, self._prev = self._prev, small
-        if prev is None or prev.shape != small.shape or cv2.norm(small, prev, cv2.NORM_L1) / small.size > STILL_DIFF:
+        if (prev is None or prev.shape != small.shape or float(small.mean()) < MIN_BRIGHTNESS
+                or cv2.norm(small, prev, cv2.NORM_L1) / small.size > STILL_DIFF):
             self._still_since = t
         elif self._still_since is not None and t - self._still_since >= STILL_S:
             self._bg = small.astype(np.float32)
@@ -95,14 +101,24 @@ class TipDetector:
         c = cv2.split(cv2.absdiff(small, bg))
         diff = cv2.max(cv2.max(c[0], c[1]), c[2])
         fg = (diff > self.diff_thresh).view(np.uint8) * np.uint8(255)
-        ys, xs = np.nonzero(fg)
-        if len(ys):
-            ratio = small[ys, xs].astype(np.float32) / (bg[ys, xs].astype(np.float32) + 1.0)
-            rmax, rmin = ratio.max(axis=1), ratio.min(axis=1)
-            shadow = (rmax < 0.95) & (rmin > 0.40) & (rmax - rmin < 0.12)
-            fg[ys[shadow], xs[shadow]] = 0
+        fg[self._shadow(small, bg) > 0] = 0
         fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, self._k3)
         return cv2.morphologyEx(fg, cv2.MORPH_CLOSE, self._k5)
+
+    @staticmethod
+    def _shadow(small: np.ndarray, bg: np.ndarray) -> np.ndarray:
+        """Darker but same colour as the background (all channels dimmed by a similar factor).
+        Shadows are smooth, so this runs at half the work size."""
+        h, w = small.shape[:2]
+        half = (max(1, w // 2), max(1, h // 2))
+        f = cv2.resize(small, half, interpolation=cv2.INTER_AREA).astype(np.float32)
+        b = cv2.resize(bg, half, interpolation=cv2.INTER_AREA).astype(np.float32)
+        b += 1.0
+        r = cv2.split(cv2.divide(f, b))
+        rmax = cv2.max(cv2.max(r[0], r[1]), r[2])
+        rmin = cv2.min(cv2.min(r[0], r[1]), r[2])
+        shadow = ((rmax < 0.95) & (rmin > 0.40) & (rmax - rmin < 0.12)).view(np.uint8)
+        return cv2.resize(shadow, (w, h), interpolation=cv2.INTER_NEAREST)
 
     def _refine(self, frame: np.ndarray, cx: float, cy: float,
                 entry: Tuple[float, float]) -> Tuple[float, float]:
@@ -156,9 +172,16 @@ class TipDetector:
         fg = self.foreground(small)
         self.mask = fg
         h, w = fg.shape
+        if cv2.countNonZero(fg) > SCENE_CHANGE_FRAC * h * w:
+            self.reset()
+            self.scene_changed = True
+            self._learn_when_still(small, t)
+            return None
         n, labels, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
         min_area = self.min_area_frac * w * h
-        on_edge = set(np.unique(np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])).tolist())
+        edges = [(labels[0, :], np.arange(w), np.zeros(w)), (labels[-1, :], np.arange(w), np.full(w, h - 1)),
+                 (labels[:, 0], np.zeros(h), np.arange(h)), (labels[:, -1], np.full(h, w - 1), np.arange(h))]
+        on_edge = set(np.unique(np.concatenate([e[0] for e in edges])).tolist())
         best, best_area = 0, 0
         for k in range(1, n):
             area = int(stats[k, cv2.CC_STAT_AREA])
@@ -168,21 +191,22 @@ class TipDetector:
         det = None
         keep = np.zeros_like(fg)
         if best:
-            blob = labels == best
-            border = np.zeros_like(blob)
-            border[0, :], border[-1, :], border[:, 0], border[:, -1] = blob[0, :], blob[-1, :], blob[:, 0], blob[:, -1]
-            by, bx = np.nonzero(border)
+            bx0, by0, bw, bh = (int(v) for v in stats[best, :4])
+            box = (slice(by0, by0 + bh), slice(bx0, bx0 + bw))
+            blob = labels[box] == best
+            ex = float(np.concatenate([e[1][e[0] == best] for e in edges]).mean())
+            ey = float(np.concatenate([e[2][e[0] == best] for e in edges]).mean())
             ys, xs = np.nonzero(blob)
-            ex, ey = float(bx.mean()), float(by.mean())
+            xs, ys = xs + bx0, ys + by0
             d2 = (xs - ex) ** 2 + (ys - ey) ** 2
             top = max(3, int(0.002 * len(xs)))
             idx = np.argpartition(d2, -top)[-top:]
             tx, ty = float(xs[idx].mean()), float(ys[idx].mean())
             if self._is_static(tx, ty, best_area, t):
-                self._bg[blob] = small[blob]          # it's scenery: absorb it
+                self._bg[box][blob] = small[box][blob]     # it's scenery: absorb it
                 self._static = None
             else:
-                keep[blob] = 255
+                keep[box][blob] = 255
                 s = self._scale
                 entry = ((ex + 0.5) / s - 0.5, (ey + 0.5) / s - 0.5)
                 fx, fy = self._refine(frame, (tx + 0.5) / s - 0.5, (ty + 0.5) / s - 0.5, entry)

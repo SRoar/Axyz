@@ -163,6 +163,18 @@ def test_tip_detector_learns_background_only_once_the_view_is_still():
     assert det.detect(hand_image((640, 300)), t) is not None
 
 
+def test_tip_detector_never_learns_a_black_frame_and_flags_camera_moves():
+    det = TipDetector()
+    black = np.full((H, W, 3), 5, np.uint8)               # stream not started yet
+    for i in range(60):
+        det.detect(black, i / 30)
+    assert not det.has_background
+    det.set_background(page_image())
+    moved = np.full((H, W, 3), 250, np.uint8)             # a totally different view
+    moved[300:, :] = 90
+    assert det.detect(moved, 3.0) is None and det.scene_changed and not det.has_background
+
+
 def test_tip_detector_absorbs_a_blob_that_never_moves():
     det = TipDetector()
     det.set_background(hand_image((600, 250)))            # bad background: a hand was in it
