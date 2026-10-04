@@ -32,7 +32,7 @@
 | Symptom | Do |
 |---|---|
 | WRITING never detected / flickers | `3` = force WRITING, `1` still, `2` moving, `4` lifted, `0` = give control back to the sensor |
-| Taps not detected | `t` = triple tap (done), `r` = single (repeat), `n` = double (skip) — or say "done" |
+| Taps not detected | `r` = tap 1 (read / repeat), `t` or `n` = tap 2 (next question). No third tap: an answer ends when writing stops for 2 s (press `1` after `3`) |
 | Accelerometer dead | Operator drives everything with `1`–`4` / `t` while the student acts it out |
 | Camera loses the pen / bad light | restart with `--real imu,voice,brain,auditor` (fake tracker) and hand-steer with keys |
 | Gemini slow/down | nothing — pixel fallback answers after 6 s (HUD note says `pixel fallback`) |

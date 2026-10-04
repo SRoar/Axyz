@@ -1,13 +1,14 @@
 """
 TactileReader / Illumin -- the one command that runs the whole system.   Owner: Dev 4.
 
-    python -m src.main                                  # HUD on ALL FAKES (scripted world, real time, ~35 s)
+    python -m src.main                                  # HUD on ALL FAKES (scripted world, real time, ~50 s)
     python -m src.main --real imu,brain,voice           # IMU-driven core (Dev 1 + Dev 3 pair)
     python -m src.main --real tracker,guidance,auditor  # camera pair (Dev 2 + Dev 4)
     python -m src.main --real all --debug-keys          # the full demo, keyboard rescue enabled
 
-    --debug-keys   keys 1-4 inject STILL/MOVING/WRITING/LIFTED, t = triple tap (done),
-                   r = single tap (repeat), n = double tap (skip), 0 = release the override.
+    --debug-keys   keys 1-4 inject STILL/MOVING/WRITING/LIFTED, t or n = tap 2 (next question),
+                   r = tap 1 (read / repeat), 0 = release the override.  There is no third tap:
+                   an answer ends when the writing stops for 2 s (key 1 after key 3).
                    A dead sensor can't kill the demo.  (Works with or without a real IMU.)
     --web [PORT]   also serve the browser UI + live data at http://localhost:8765 (see ui/README.md).
                    With --headless it keeps serving until Ctrl-C (add --exit-on-complete to stop sooner).
@@ -110,7 +111,7 @@ class DebugImu:
         if k in motions:
             self.inject_motion(motions[k])
         elif k == "t":
-            self.inject_tap(Tap.TRIPLE)
+            self.inject_tap(Tap.DOUBLE)
         elif k == "r":
             self.inject_tap(Tap.SINGLE)
         elif k == "n":
@@ -127,8 +128,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="TactileReader full system + HUD")
     ap.add_argument("--real", default="", help="comma list: imu,tracker,guidance,voice,brain,auditor (or: all)")
     ap.add_argument("--debug-keys", action="store_true", help="keyboard injection of motion states / taps")
-    ap.add_argument("--questions", default="data/questions.json")
-    ap.add_argument("--layout", default="data/layout.json")
+    ap.add_argument("--questions", default=None,
+                    help="default: data/questions.json with a real tracker, else the built-in sample questions")
+    ap.add_argument("--layout", default=None,
+                    help="default: data/layout.json (the real sheet) with a real tracker, else sample_layout(), "
+                         "which the fake pen's scripted path targets")
     ap.add_argument("--record", default=None, metavar="FILE.mp4", help="record the HUD to a video file")
     ap.add_argument("--headless", action="store_true", help="no window; exit when the test completes")
     ap.add_argument("--fast", action="store_true", help="fakes only: simulated clock, no sleeping")
@@ -162,7 +166,10 @@ def make_system(args: argparse.Namespace):
     if args.fast and args.web is not None:
         raise SystemExit("--web streams in real time; drop --fast")
     clock: Clock = SimClock() if args.fast else RealClock()
-    questions, layout = load_data(args.questions, args.layout)
+    if args.questions or args.layout or "tracker" in real:
+        questions, layout = load_data(args.questions or "data/questions.json", args.layout or "data/layout.json")
+    else:
+        questions, layout = sample_questions(), sample_layout()
     try:
         comps = build(real, clock, questions, layout,
                       render=not args.headless or bool(args.record) or args.web is not None)

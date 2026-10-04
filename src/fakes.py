@@ -30,11 +30,10 @@ from src.contracts import (
 S, M, W, L = MotionState.STILL, MotionState.MOVING, MotionState.WRITING, MotionState.LIFTED
 P0 = (0.50, 0.10)
 
-# (t_start, t_end, motion, pen_from, pen_to, jitter)  -- script time in seconds.
-# Two questions. q1 includes a deliberate drift OUT of the box (t=11.67..12.33) to test WARN,
-# and a short pen occlusion (OCCLUSIONS). q2 ends with a TRIPLE tap instead of idling.
 # (t_start, t_end, motion, pen_from, pen_to, jitter) -- script time in seconds.
-# Three questions. q1 includes drift OUT of box. q2 and q3 complete with taps/idle.
+# Three questions. q1 includes a deliberate drift OUT of box1 to test WARN, and a short pen
+# occlusion (OCCLUSIONS). Every answer ends the only way the plan allows: writing stops for
+# ANSWER_IDLE_S (there is no third tap). q3 is started with tap 1 ("read the question").
 SEGMENTS: List[Tuple[float, float, MotionState, Tuple[float, float], Tuple[float, float], float]] = [
     # Q1: IDLE -> MOVING -> STILL in box1 -> WRITING (with drift) -> IDLE
     (0.0, 5.0, S, P0, P0, 0.0),
@@ -50,18 +49,17 @@ SEGMENTS: List[Tuple[float, float, MotionState, Tuple[float, float], Tuple[float
     (24.0, 27.0, M, (0.20, 0.25), (0.50, 0.50), 0.0),     # move to box2
     (27.0, 28.0, S, (0.50, 0.50), (0.50, 0.50), 0.0),
     (28.0, 33.0, W, (0.50, 0.50), (0.30, 0.55), 0.006),
-    (33.0, 38.0, S, (0.30, 0.55), (0.30, 0.55), 0.0),     # Q2 done via TRIPLE tap at 33.3s
+    (33.0, 38.0, S, (0.30, 0.55), (0.30, 0.55), 0.0),     # Answer 2 done (idle timeout)
     # Transition to Q3
     (38.0, 39.0, L, (0.30, 0.55), (0.30, 0.55), 0.0),
     (39.0, 42.0, M, (0.30, 0.55), (0.50, 0.75), 0.0),     # move to box3
     (42.0, 43.0, S, (0.50, 0.75), (0.50, 0.75), 0.0),     # lock in box3
     (43.0, 48.0, W, (0.50, 0.75), (0.40, 0.80), 0.006),   # writing q3
-    (48.0, 1e9, S, (0.40, 0.80), (0.40, 0.80), 0.0),      # Q3 done via TRIPLE tap at 48.3s
+    (48.0, 1e9, S, (0.40, 0.80), (0.40, 0.80), 0.0),      # Answer 3 done (idle timeout)
 ]
 OCCLUSIONS = [(6.0, 6.3)]
 TAPS = [
-    (33.3, Tap.TRIPLE),  # completes Q2
-    (48.3, Tap.TRIPLE),  # completes Q3
+    (36.3, Tap.SINGLE),  # after answer 2 is recorded: "read the next question"
 ]
 
 

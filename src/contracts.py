@@ -1,5 +1,5 @@
 """
-TactileReader / Illumin -- THE CONTRACT.  (CONTRACT_VERSION 1.0)
+TactileReader / Illumin -- THE CONTRACT.  (CONTRACT_VERSION 1.1)
 
 Every module talks to every other module ONLY through the types in this file.
 Nobody edits this file without telling Dev 4 (the contract owner) first.
@@ -17,12 +17,14 @@ Real-world size of a page unit: PAGE_W_CM x PAGE_H_CM.
 
 Units: seconds (float, from Clock.now()), centimetres, g for accelerometer.
 
-Serial protocol (115200 baud, newline-terminated ASCII, Arduino 101):
+Serial protocol (115200 baud, newline-terminated ASCII, Arduino UNO Q + MMA7660, accelerometer only):
     Arduino -> PC
-        READY                         sent once at boot
-        S,<ms>,<ax>,<ay>,<az>,<light> raw sample, ~50 Hz  (ax..az in g, light = analogRead(A0))
+        READY                         sent at boot and in reply to PING
+        S,<ms>,<ax>,<ay>,<az>         raw sample, ~33 Hz  (g; the parser still accepts an old 6th field)
         M,<STILL|MOVING|WRITING|LIFTED>   sent ONLY when the motion state changes
-        T,<1|2|3>                     tap gesture (1=single, 2=double, 3=triple)
+        T,<1|2>                       tap gesture (1 = read / repeat the question, 2 = next question)
+                                      There is no third tap and no voice input: an answer ends when
+                                      the writing stops for TIMING.ANSWER_IDLE_S.
     PC -> Arduino
         H,<LOCK|WARN|COMPLETE|GUIDE_LEFT|GUIDE_RIGHT|GUIDE_BOTH|OFF>
         PING                          (Arduino answers READY)
@@ -39,7 +41,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union, runtime_checkable
 
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "1.1"
 
 DEVICE_BAUD = 115200
 PAGE_W_CM = 21.59   # US Letter
@@ -56,9 +58,9 @@ class MotionState(str, Enum):
 
 class Tap(int, Enum):
     NONE = 0
-    SINGLE = 1   # "repeat the question"
-    DOUBLE = 2   # "skip this question"
-    TRIPLE = 3   # "I'm done, audit my answer"
+    SINGLE = 1   # "read / repeat the question"
+    DOUBLE = 2   # "next question" (skip)
+    TRIPLE = 3   # legacy: the firmware never sends it (kept so old code still parses)
 
 
 class HapticCmd(str, Enum):

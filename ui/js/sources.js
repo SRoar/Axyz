@@ -27,7 +27,7 @@
   ];
 
   // [t0, t1, motion, penFrom, penTo, jitter]: Q1 nav + a drift OUT of the box, Q2 with the pen hidden
-  // under the hand while writing (the pitch moment) + triple tap, Q3 skipped with a double tap.
+  // under the hand while writing (the pitch moment), answers end when the writing stops, Q3 skipped with a double tap.
   const S = "STILL", M = "MOVING", W = "WRITING", L = "LIFTED";
   const SEG = [
     [0, 4.5, S, [0.5, 0.07], [0.5, 0.07], 0],
@@ -45,7 +45,7 @@
     [35, 1e9, S, [0.2, 0.59], [0.2, 0.59], 0],
   ];
   const OCCLUSIONS = [[0, 2.4], [31, 32.2]];     // pen not yet picked up at the start; later, hidden under the hand while writing
-  const TAPS = [[35.5, 3], [41.5, 2]];
+  const TAPS = [[41.5, 2]];
   const COMPLETE_HOLD_S = 8;
 
   const r = (x, n) => { const k = Math.pow(10, n == null ? 3 : n); return Math.round(x * k) / k; };
@@ -301,7 +301,7 @@
         const motions = { 1: S, 2: M, 3: W, 4: L };
         if (motions[k]) sys.override = motions[k];
         else if (k === "0") sys.override = null;
-        else if (k === "t") sys.pendingTaps.push(3);
+        else if (k === "t") sys.pendingTaps.push(2);
         else if (k === "r") sys.pendingTaps.push(1);
         else if (k === "n") sys.pendingTaps.push(2);
         else return false;

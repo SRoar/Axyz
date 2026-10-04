@@ -26,7 +26,7 @@ python -m src.main --real tracker,guidance,auditor       # camera pair
 python -m src.main --real all --debug-keys               # full system, keyboard rescue enabled
 python -m src.main --real all --record demo/backup_run.mp4   # record the HUD (backup video)
 ```
-`--debug-keys`: `1` STILL · `2` MOVING · `3` WRITING · `4` LIFTED · `t` triple tap (done) · `r` single tap (repeat) · `n` double tap (skip) · `0` release override. `q`/ESC quits, `s` saves a screenshot.
+`--debug-keys`: `1` STILL · `2` MOVING · `3` WRITING · `4` LIFTED · `r` tap 1 (read / repeat) · `t` or `n` tap 2 (next question) · `0` release override. `q`/ESC quits, `s` saves a screenshot.
 Other flags: `--headless` (no window), `--fast` (fakes only, simulated clock), `--max-seconds N`, `--exit-on-complete`.
 
 ## Browser UI

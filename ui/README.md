@@ -25,7 +25,7 @@ URL parameters: `?source=fake|live` force a source, `?server=http://host:8765` p
 `?speed=2` demo speed, `?at=12.5` start the demo 12.5 s in (screenshots, rehearsal).
 
 Operator keys (same as the cv2 HUD, work anywhere on the page, and from the dropdown top right):
-`1` still, `2` moving, `3` writing, `4` lifted, `0` hand control back to the sensor, `r` repeat tap, `n` skip tap, `t` done tap.
+`1` still, `2` moving, `3` writing, `4` lifted, `0` hand control back to the sensor, `r` repeat tap, `n` (or `t`) skip tap.
 Live mode needs `--debug-keys`, otherwise the UI tells you.
 
 ## How it plugs in

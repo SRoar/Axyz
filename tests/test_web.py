@@ -50,8 +50,8 @@ def test_snapshot_has_the_schema_and_is_strict_json():
     assert set(d) == TOP_KEYS and d["v"] == 1 and d["source"] == "live"
     json.dumps(d, allow_nan=False)
     assert d["phase"] in {p.value for p in Phase} and d["motion"] in {"STILL", "MOVING", "WRITING", "LIFTED"}
-    assert [b["label"] for b in d["boxes"]] == ["Answer 1", "Answer 2"]
-    assert d["question"]["total"] == 2 and d["question"]["id"] == "q1"
+    assert [b["label"] for b in d["boxes"]] == ["Answer 1", "Answer 2", "Answer 3"]
+    assert d["question"]["total"] == 3 and d["question"]["id"] == "q1"
     assert {"x", "y", "confidence"} == set(d["pen"]) and 0 <= d["pen"]["x"] <= 1
     assert set(d["haptic"]) == {"cmd", "seq", "age_s", "active"}
     assert d["camera"]["has_frame"] is True and d["debug"] == {"enabled": False, "override": None}
@@ -97,7 +97,7 @@ def test_progress_tracks_answered_and_active_then_complete():
     run_until(s, clock, snap, until=lambda sys_: sys_.c.brain.phase == Phase.COMPLETE)
     d = snap.build()
     assert d["phase"] == "COMPLETE"
-    assert [p["status"] for p in d["progress"]] == ["answered", "answered"]
+    assert [p["status"] for p in d["progress"]] == ["answered"] * 3
     assert d["audit"] is not None and d["audit"]["ink_present"] is True
 
 
@@ -117,9 +117,9 @@ def test_skip_is_recorded_as_skipped_for_the_right_question():
 def test_taps_are_reported_once_and_expire():
     s, clock, _ = make()
     snap = Snapshotter(s)
-    run_until(s, clock, snap, stop_t=33.6)                      # scripted TRIPLE at 33.3 s
-    assert [t["n"] for t in snap.build()["taps"]] == [3]
-    run_until(s, clock, snap, stop_t=36.0)
+    run_until(s, clock, snap, stop_t=36.6)                      # scripted tap 1 at 36.3 s
+    assert [t["n"] for t in snap.build()["taps"]] == [1]
+    run_until(s, clock, snap, stop_t=39.0)
     assert snap.build()["taps"] == []
 
 

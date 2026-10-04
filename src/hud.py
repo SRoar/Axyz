@@ -372,6 +372,6 @@ class Hud:
     def _debug_badge(self, img) -> None:
         d = self.debug
         ov = getattr(d, "override", None)
-        txt = f"DEBUG KEYS ON  override={ov.value if ov else 'none'}   1 still 2 moving 3 writing 4 lifted | t tap3 r tap1 n tap2 | 0 release"
+        txt = f"DEBUG KEYS ON  override={ov.value if ov else 'none'}   1 still 2 moving 3 writing 4 lifted | r tap1 t/n tap2 | 0 release"
         cv2.rectangle(img, (0, H - 26), (W, H), (60, 40, 20), -1)
         put(img, txt, (12, H - 8), 0.55, AMBER if ov else GREY)

@@ -85,7 +85,7 @@ def test_debug_imu_overrides_motion_and_injects_taps():
     assert [e.motion for e in ev] == [MotionState.WRITING]
     assert d.poll() == []                                # edges delivered once
     assert d.handle_key(ord("t"))
-    assert [e.tap for e in d.poll()] == [Tap.TRIPLE]
+    assert [e.tap for e in d.poll()] == [Tap.DOUBLE]
     assert d.handle_key(ord("r")) and d.handle_key(ord("n"))
     assert [e.tap for e in d.poll()] == [Tap.SINGLE, Tap.DOUBLE]
     assert not d.handle_key(ord("x")) and not d.handle_key(255)
@@ -105,14 +105,14 @@ def test_debug_override_drops_contradicting_hardware_motion_but_keeps_taps():
 
 
 def test_debug_keys_can_drive_the_whole_flow_with_a_dead_sensor():
-    """Nobody touches the pen; a teammate types keys: still -> (read) -> writing -> tap3 -> done."""
+    """Nobody touches the pen; a teammate types keys: still -> (read) -> writing -> still -> audit."""
     clock = SimClock()
     q, l = sample_questions(), sample_layout()
     comps = build([], clock, q, l, render=False)
     comps.imu = DebugImu(_DeadImu(), clock)
     s = System(comps, clock, q, l)
     s.start()
-    script = {0.5: "1", 6.0: "3", 9.0: "t"}
+    script = {0.5: "1", 6.0: "3", 9.0: "1"}
     t = 0.0
     seen = set()
     while t < 14:
@@ -143,7 +143,7 @@ def test_hud_renders_every_phase_without_error_and_isnt_blank():
     s.start()
     phases = set()
     t = 0.0
-    while t < 40:
+    while t < 55:
         s.step()
         hud.observe()
         phases.add(s.c.brain.phase)
@@ -160,8 +160,8 @@ def test_hud_tracks_taps_trail_voice_and_haptics():
     s, clock = make()
     hud = Hud(s)
     s.start()
-    run(s, clock, 34.0, hud)                              # scripted triple tap at t=33.3
-    assert any(n == 3 for _, n in hud.taps)
+    run(s, clock, 36.6, hud)                              # scripted tap 1 at t=36.3
+    assert any(n == 1 for _, n in hud.taps)
     assert len(hud.haptics) > 3 and len(hud.voice) > 3
     assert len(hud.trail) == 0 or hud.trail[0][0] >= clock.now() - 2.1
 
@@ -202,15 +202,12 @@ def test_cli_unknown_component_is_a_clear_error():
     assert "banana" in str(e.value)
 
 
-def test_cli_real_component_not_merged_yet_names_the_owner():
+def test_cli_real_component_not_merged_yet_names_the_owner(monkeypatch):
+    import src.factory
+    monkeypatch.setitem(src.factory.REAL, "brain", ("src.not_merged_yet", "StateMachine"))
     with pytest.raises(SystemExit) as e:
         make_system(parse_args(["--real", "brain", "--questions", "x", "--layout", "y"]))
-    msg = str(e.value)
-    try:
-        import src.state_machine  # noqa: F401
-        pytest.skip("Dev 3 already merged state_machine")
-    except ImportError:
-        assert "Dev 3" in msg
+    assert "Dev 3" in str(e.value)
 
 
 def test_fast_with_real_hardware_is_rejected():
@@ -254,5 +251,5 @@ def test_real_auditor_closes_the_loop_through_system():
     audits = [v for _, k, v in s.log if k == "AUDIT"]
     spoken = [v for _, k, v in s.log if k == "SPEAK"]
     assert s.c.brain.phase == Phase.COMPLETE and s.errors == {}
-    assert len(audits) == 2 and all("ink=True" in a for a in audits), audits
-    assert sum("Answer recorded" in x for x in spoken) == 2
+    assert len(audits) == len(Q) and all("ink=True" in a for a in audits), audits
+    assert sum("Answer recorded" in x for x in spoken) == len(Q)
