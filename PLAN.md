@@ -1,7 +1,7 @@
 # TactileReader — Master Plan (hackathon hours 12 → 24)
 
 Blind / low-vision student takes a **paper** free-response test. No scribe.
-A **pen probe** (Arduino 101: accelerometer + light sensor + 2 buzzers) and an **overhead camera** guide the pen to each answer box, keep the writing inside it, and a **voice** reads the questions and confirms the answer.
+A **pen probe** (Arduino UNO Q: accelerometer + light sensor + 2 buzzers) and an **overhead camera** guide the pen to each answer box, keep the writing inside it, and a **voice** reads the questions and confirms the answer.
 
 > **Design rule: the camera knows WHERE the pen is. The accelerometer knows WHAT the pen is doing. The brain acts on the combination.**
 > The IMU is essential because the camera cannot tell hovering from writing, cannot see the pen under the hand, and has no way to receive a "I'm done" command. The IMU provides all three.
@@ -34,8 +34,8 @@ Drop-in: copy `src/contracts.py fakes.py factory.py system.py sim.py` and `data/
 ## 1. Data flow
 
 ```
- ┌────────────── PEN PROBE (Arduino 101) ──────────────┐        ┌───────── OVERHEAD CAMERA ─────────┐
- │ LIS3DH accel 100Hz ─► classifier ─► STILL/MOVING/   │        │ frame ─► marker detect ─► homography│
+ ┌────────────── PEN PROBE (Arduino UNO Q) ────────────┐        ┌───────── OVERHEAD CAMERA ─────────┐
+ │ MMA7660 accel 120Hz ─► classifier ─► STILL/MOVING/  │        │ frame ─► marker detect ─► homography│
  │                        WRITING/LIFTED + taps 1/2/3  │        │          ─► PenState (page coords)  │
  │ light sensor A0 ─► raw stream                       │        └───────────────┬────────────────────┘
  │ buzzers D3(L) D4(R) ◄── haptic pattern engine       │                        │
@@ -126,8 +126,8 @@ The brain **never speaks during WRITING** and **never fires WARN unless the IMU 
 
 ## 5. What EVERY component does
 
-### 5.1 Firmware (Arduino 101) — Dev 1
-- Initialise native `Wire.h`, LIS3DH at I²C `0x18` (confirm with the scanner; the existing sketch scans), 100 Hz, ±2 g. Serial 115200.
+### 5.1 Firmware (Arduino UNO Q) — Dev 1
+- Initialise `Wire.h`, **MMA7660 at I²C `0x4C`** (found by the bus scan; the module is the Grove 3-Axis Digital Accelerometer, not a LIS3DH), up to 120 Hz, ±1.5 g. The output is only 6-bit (about 21.33 counts per g, ~47 mg steps), so it is coarse: check early that WRITING jitter and taps are still visible (see the hardware notes below). Serial 115200.
 - **Non-blocking loop, no `delay()`.** Sample at 100 Hz, emit `S,…` every 2nd sample.
 - **Motion classifier** over a ~0.3 s rolling window of |a|: STILL (tiny variance), MOVING (large, low-frequency), WRITING (small-to-medium, sustained high-frequency jitter, 5–20 Hz), LIFTED (gravity vector shifted from baseline / z spike). Hysteresis: a state must hold ~100 ms to be emitted; emit `M,<STATE>` on change only.
 - **Tap detector:** spike in |a| deviation > ~0.4 g lasting < 60 ms; group spikes within 500 ms; emit `T,n` after 500 ms of quiet.
@@ -183,7 +183,7 @@ Times are hackathon hours; if you start later than H12, shrink the first block.
 
 | # | Task | Est |
 |---|---|---|
-| 1.1 | Sketch skeleton: `Wire.h`, LIS3DH @100 Hz, non-blocking loop, `S` stream @50 Hz, `READY` | 1.0 h |
+| 1.1 | Sketch skeleton: `Wire.h`, MMA7660 @0x4C, ~100 Hz, non-blocking loop, `S` stream @50 Hz, `READY` (a working accelerometer-only sketch is already in `accel_stream/`) | 1.0 h |
 | 1.2 | **Mount the probe on the pen**, then `tools/imu_record.py`: record labeled CSV for STILL / MOVING / WRITING / LIFTED with the real pen on real paper (≥ 30 s each) | 1.5 h |
 | 1.3 | Motion classifier + hysteresis, thresholds tuned from the recordings; `M,` events | 2.0 h |
 | 1.4 | Tap detector (1/2/3) → `T,n` | 1.5 h |
@@ -300,3 +300,20 @@ Times are hackathon hours; if you start later than H12, shrink the first block.
 | 4 | Integration + HUD + auditor + demo | 10.5 | none (all-fakes HUD + saved photos) |
 
 First time anyone depends on anyone: checkpoint C2 (H16), and by then each side has already passed its own tests.
+
+## 12. Hardware notes (Dev 1)
+
+Changes from the original plan, found while bringing up the hardware (Oct 2026):
+
+| Item | Original plan | Actual |
+|---|---|---|
+| Pen board | Arduino 101 | **Arduino UNO Q** (the 101 would not accept uploads: "Timed out waiting for Arduino 101") |
+| Accelerometer | LIS3DH, I²C `0x18` | **MMA7660, I²C `0x4C`** (Grove 3-Axis Digital Accelerometer), 6-bit, about 21.33 counts/g, ±1.5 g, up to 120 Hz |
+| Upload path | USB DFU | UNO Q uploads over `adb`; board package `arduino:zephyr:unoq`, serial port shows up as COM4 on Windows |
+
+Working code: `accel_stream/accel_stream.ino` streams `A,<ms>,<x_g>,<y_g>,<z_g>` at 50 Hz and was confirmed on the real UNO Q. Task 1.1 turns it into the contract's `READY` / `S,…` format with the A0 light value added.
+
+Known issues and open questions:
+- **Uploads to the UNO Q are intermittent**: sometimes `adb.exe: device offline`, then working again with no clear change. Workaround: unplug, wait about 60 s for the board to boot, try again; close the Serial Monitor before using the port from scripts.
+- **Coarse accelerometer.** About 47 mg per step with a ±1.5 g range. WRITING jitter and 0.4 g tap spikes may be harder to see or may clip. Record data early (task 1.2) before trusting any threshold. The kill switches in §8 still apply.
+- **Not yet verified on the UNO Q:** that `tone()` can drive both buzzers (D3, D4) at the same time, and the range of the A0 light-sensor reading (it may differ from the 10-bit values the old test sketch assumed).
