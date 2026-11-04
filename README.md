@@ -120,4 +120,4 @@ Aditya Kanginaya Madhuchandra, Yug Shah, Aditya Kumar, Shivaji Raj
 
 ## License
 
-TODO: add a license.
+See [LICENSE.md](LICENSE.md).
